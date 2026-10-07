@@ -1,0 +1,67 @@
+[tool.poetry]
+name = "mxm-control"
+version = "0.1.0"
+description = "Reusable control-plane mechanisms for provisioning, configuring, and governing the MXM computational estate."
+keywords = ["mxm", "control", "estate"]
+authors = ["mxm <contact@moneyexmachina.com>"]
+license = "MIT"
+readme = "README.md"
+packages = [{ include = "mxm", from = "src" }]
+homepage = "https://github.com/moneyexmachina/mxm-control"
+repository = "https://github.com/moneyexmachina/mxm-control"
+include = ["src/mxm/control/py.typed"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3.13",
+  "Typing :: Typed",
+]
+[tool.poetry.dependencies]
+python = ">=3.13,<4.0"
+typer = "^0.20.0"
+jinja2 = "^3.1.4"
+rich = "^14.2.0"
+tomlkit = "^0.13.2"
+gitpython = "^3.1.43"
+pathspec = "^0.12.1"
+mxm-config = "^0.3.0"
+tomli-w = "^1.2.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.4.2"
+ruff = "^0.14.3"
+black = "^25.9.0"
+isort = "^7.0.0"
+pyright = "^1.1.407"
+
+[build-system]
+requires = ["poetry-core>=2.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+# ---- Tooling (package-local, MXM defaults) ----
+[tool.black]
+line-length = 88
+target-version = ["py313"]
+
+[tool.isort]
+profile = "black"
+line_length = 88
+known_first_party = ["mxm"]
+combine_as_imports = true
+
+[tool.ruff]
+line-length = 88
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E","F","I","B","UP","C90","RUF"]
+ignore = ["E203","E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["mxm"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+pythonpath = ["src"]
+

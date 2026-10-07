@@ -1,0 +1,44 @@
+# managed: mxm-foundry:begin gitignore v1
+
+# Python / builds
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+build/
+dist/
+.eggs/
+*.egg-info/
+
+# Virtual envs
+.venv/
+.env/
+.envrc
+
+# Tool caches & reports
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.pyright/
+.mypy_cache/
+.ruff_cache/
+.cache/
+
+# Editors/OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Poetry local files
+.poetry/
+
+# Node (if templates ever ship web bits)
+node_modules/
+
+# Generated artifacts (docs, etc.)
+site/
+docs/_build/
+
+# end: mxm-foundry:end
