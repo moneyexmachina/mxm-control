@@ -1,138 +1,181 @@
-![Version](https://img.shields.io/github/v/release/moneyexmachina/mxm-foundry)
-![License](https://img.shields.io/github/license/moneyexmachina/mxm-foundry)
+![Version](https://img.shields.io/github/v/release/moneyexmachina/mxm-control)
+![License](https://img.shields.io/github/license/moneyexmachina/mxm-control)
 ![Python](https://img.shields.io/badge/python-3.13+-blue)
 [![Checked with pyright](https://microsoft.github.io/pyright/img/pyright_badge.svg)](https://microsoft.github.io/pyright/)
 
-Policy-driven validation and standardisation tool for Money Ex Machina Python packages.
+Reusable control-plane mechanisms for provisioning, configuring, and governing the MXM computational estate.
 
-`mxm-foundry` defines what constitutes a *valid MXM package* and provides a single interface (`mxm-foundry check`) to enforce that contract.
+`mxm-control` provides the mechanisms used to realise the authoritative estate intent defined in [`mxm-estate`](https://github.com/moneyexmachina/mxm-estate).
 
 ## Purpose
 
-MXM packages are designed to be:
+The **MXM Estate Control System** separates reusable control machinery from the concrete definition of the MXM computational estate.
 
-- structurally consistent  
-- fully typed  
-- reproducibly configured  
-- CI-ready by construction  
-- easy to reason about across repositories  
+`mxm-control` is the reusable mechanism side of that system.
 
-`mxm-foundry` enforces this through a set of **checks** and **policies** covering:
+It provides control mechanisms across three operational layers:
 
-- filesystem structure  
-- `pyproject.toml` semantics  
-- typing configuration (Pyright)  
-- formatting configuration (Black, Ruff, Isort)  
-- Makefile orchestration (`lint`, `type`, `test`, `check`)  
-- testing conventions (pytest)  
-- documentation structure (`README.md`, `CHANGELOG.md`)  
-- license compliance  
+- **Infrastructure** — provision external resources such as machines, networks, firewalls, volumes, and DNS.
+- **Systems** — configure hosts and appliances, including operating systems, packages, services, networking, and local runtime state.
+- **Services** — establish and evolve the logical administrative state of services such as OpenBao, PostgreSQL, GitHub, Tailscale, and Prefect.
 
-A package that passes all checks satisfies the MXM **publish contract**.
+The package is intended to compose established deterministic tools rather than replace them. Depending on the layer and control semantics, these may include:
+
+- OpenTofu for declarative resource reconciliation;
+- Ansible and bootstrap tooling for system configuration;
+- service-specific migration mechanisms for ordered state transitions;
+- native service APIs and CLIs for transactional operations.
+
+`mxm-control` contains **mechanisms, not concrete MXM estate intent**.
+
+Concrete topology, identities, policy bindings, service configuration, and estate migration history belong in the private `mxm-estate` repository.
+
+Secrets belong in OpenBao and operational controller state belongs in dedicated state backends.
 
 ## Installation
 
+Install the package for development with Poetry:
+
 ```bash
-pip install mxm-foundry
+poetry install
 ```
 
 ## Usage
 
-Run the validation tool against a project:
+`mxm-control` is currently being established as the reusable control-plane component of the MXM Estate Control System.
 
-```bash
-mxm-foundry check <project-root>
+Its principal structure is organised around:
+
+```text
+mxm-control/
+├── infra/
+├── systems/
+├── services/
+├── operations/
+├── src/
+│   └── mxm/
+│       └── control/
+└── tests/
 ```
 
-Example:
+The repository will provide reusable mechanisms that can be instantiated by `mxm-estate`.
 
-```bash
-mxm-foundry check .
+The governing distinction is:
+
+```text
+mxm-control
+    how an estate can be controlled
+
+mxm-estate
+    how the MXM estate should be constituted
+
+realised estate
+    the infrastructure, systems, and services that actually exist
 ```
 
-Output is grouped by **policy** and reports:
+`mxm-control` does not contain domain application logic. MXM domain packages such as `mxm-runtime`, `mxm-secrets`, `mxm-config`, `mxm-dataio`, and `mxm-moneymachine` operate within and consume capabilities provided by the realised estate.
 
-- individual check results  
-- policy-level pass/fail status  
-- summary counts  
-- non-zero exit code on failure (CI-compatible)  
+## Control Semantics
 
-## Policy Model
+The Estate Control System distinguishes three forms of change.
 
-`mxm-foundry` organises validation into policies:
+### Reconciliation
 
-- **License policy** — LICENSE presence and canonical content  
-- **Typing policy** — Pyright configuration, absence of `[tool.pyright]`, typing markers  
-- **Formatting policy** — canonical Black, Ruff, Isort configuration and Makefile integration  
-- **Pyproject policy** — structural correctness of `pyproject.toml`  
-- **Testing policy** — pytest usage and Makefile integration  
-- **Check-gate policy** — enforcement of `make check` as integration point  
-- **Documentation policy** — README structure and CHANGELOG presence/format  
-- **Misc policy** — remaining structural checks  
+Reconciliation expresses a desired equilibrium state:
 
-Each policy aggregates multiple checks and fails atomically if any check fails.
+> Make and keep this condition true.
 
-## Canonical Configuration
+Where a mature provider exists, OpenTofu is the preferred mechanism.
 
-MXM packages are standardised against canonical definitions shipped with `mxm-foundry`:
+### Migration
 
-- `canonical/pyproject.toml`  
-- `canonical/pyrightconfig.json`  
-- `canonical/Makefile`  
+Migration expresses an ordered and auditable transition:
 
-Checks compare project configuration **exactly** against these canonical sources.
+> Move the estate from state N to state N+1.
 
-This ensures:
+Migration is used where transition order or historical evolution is itself significant.
 
-- zero configuration drift across packages  
-- predictable tooling behaviour  
-- uniform developer experience  
+### Operation
 
-## Makefile Contract
+An operation is a transactional action:
 
-The Makefile is a first-class interface in MXM packages.
+> Do this now.
 
-Required targets:
+Operations normally use the underlying service API or CLI, with `mxm-control` providing a thin operator surface where useful for safety or consistency.
 
-- `fmt` — formatting (ruff --fix, black, isort)  
-- `lint` — static checks (ruff, black --check, isort --check)  
-- `type` — type checking (pyright)  
-- `test` — pytest execution  
-- `check` — aggregate of `lint`, `type`, `test`  
-- `ci` — alias for `check`  
-
-`make check` is the **canonical publish gate**.
+These semantics remain distinct and should not be collapsed into a single custom orchestration framework.
 
 ## Design Principles
 
-- **Single validation interface**  
-  One command (`mxm-foundry check`) defines package validity.  
+- **Mechanism separate from intent**  
+  `mxm-control` provides reusable control mechanisms; `mxm-estate` defines the concrete MXM estate.
 
-- **Policy-driven architecture**  
-  Checks are grouped into semantic domains rather than treated independently.  
+- **Layered control model**  
+  Infrastructure, systems, and services are treated as distinct operational layers.
 
-- **Canonical configuration**  
-  Tooling configuration is not inferred or approximated; it is enforced.  
+- **Use established mechanisms first**  
+  OpenTofu, Ansible, native migration tooling, and service APIs are preferred over custom orchestration.
 
-- **Deterministic results**  
-  Checks run in a fixed order with stable output.  
+- **Deterministic actuation**  
+  Estate changes should be inspectable, reproducible, testable, and auditable.
 
-- **Strict typing**  
-  Fully Pyright-clean and PEP 561 compliant.  
+- **Explicit control semantics**  
+  Reconciliation, migration, and operation are separate concepts with different mechanisms.
+
+- **Public by construction**  
+  `mxm-control` contains no private estate topology, operational state, or secrets.
 
 - **Minimal implicit behaviour**  
-  All structure and configuration is explicit and inspectable.  
+  Control behaviour and authority boundaries should be explicit and inspectable.
+
+- **Domain separation**  
+  The control plane establishes capabilities; domain systems exercise them.
+
+## Architecture
+
+The canonical architecture is documented in:
+
+```text
+docs/estate-control-system.md
+```
+
+At a high level:
+
+```text
+mxm-estate
+    authoritative estate intent
+          │
+          ▼
+mxm-control
+    reusable control mechanisms
+          │
+          ▼
+realised estate
+    infrastructure
+    systems
+    services
+          │
+          ▼
+MXM domain systems
+```
 
 ## Development
+
+Install dependencies and run the canonical MXM validation gate:
 
 ```bash
 poetry install
 
 make check
-
-poetry run mxm-foundry --help
 ```
+
+All development must remain compliant with the `mxm-foundry` package contract.
+
+Changes should preserve the fundamental repository boundary:
+
+> Generic and reusable control machinery belongs in `mxm-control`; concrete MXM estate intent belongs in `mxm-estate`.
 
 ## License
 
 MIT License. See [LICENSE](LICENSE).
+Policy-driven validation and standardisation tool for Money Ex Machina Python packages.
