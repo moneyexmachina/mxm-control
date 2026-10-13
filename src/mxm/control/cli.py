@@ -3,6 +3,12 @@ from typing import Annotated
 
 import typer
 
+from mxm.control.github.actions_policy import (
+    ActionsPolicyError,
+    plan_actions_policy,
+)
+from mxm.control.github.api import GitHubApi, GitHubApiError
+
 app = typer.Typer(help="Reusable control mechanisms for the MXM computational estate.")
 
 plan_app = typer.Typer(help="Plan changes without modifying realised state.")
@@ -32,7 +38,17 @@ def plan_github_actions(
     ],
 ) -> None:
     """Plan reconciliation of a GitHub organization Actions policy."""
-    raise NotImplementedError
+    try:
+        plan = plan_actions_policy(
+            GitHubApi(),
+            organization,
+            policy,
+        )
+    except (ActionsPolicyError, GitHubApiError) as exc:
+        typer.echo(f"ERROR: {exc}", err=True)
+        raise typer.Exit(1) from exc
+
+    typer.echo(f"{plan.action.value:<10} {plan.name}")
 
 
 @check_app.command("github-actions")
