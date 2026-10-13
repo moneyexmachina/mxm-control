@@ -5,6 +5,7 @@ import typer
 
 from mxm.control.github.actions_policy import (
     ActionsPolicyError,
+    PlanAction,
     plan_actions_policy,
 )
 from mxm.control.github.api import GitHubApi, GitHubApiError
@@ -53,10 +54,7 @@ def plan_github_actions(
 
 @check_app.command("github-actions")
 def check_github_actions(
-    organization: Annotated[
-        str,
-        typer.Option("--organization"),
-    ],
+    organization: Annotated[str, typer.Option("--organization")],
     policy: Annotated[
         Path,
         typer.Option(
@@ -69,7 +67,25 @@ def check_github_actions(
     ],
 ) -> None:
     """Check a GitHub organization Actions policy for drift."""
-    raise NotImplementedError
+    try:
+        plan = plan_actions_policy(
+            GitHubApi(),
+            organization,
+            policy,
+        )
+    except (ActionsPolicyError, GitHubApiError) as exc:
+        typer.echo(f"ERROR: {exc}", err=True)
+        raise typer.Exit(1) from exc
+
+    if plan.action is PlanAction.NO_CHANGE:
+        typer.echo(f"OK        {plan.name}")
+        return
+
+    typer.echo(
+        f"DRIFT     {plan.name} ({plan.action.value})",
+        err=True,
+    )
+    raise typer.Exit(1)
 
 
 @apply_app.command("github-actions")
