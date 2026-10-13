@@ -6,6 +6,7 @@ import typer
 from mxm.control.github.actions_policy import (
     ActionsPolicyError,
     PlanAction,
+    apply_actions_policy,
     plan_actions_policy,
 )
 from mxm.control.github.api import GitHubApi, GitHubApiError
@@ -106,4 +107,14 @@ def apply_github_actions(
     ],
 ) -> None:
     """Reconcile a GitHub organization Actions policy."""
-    raise NotImplementedError
+    try:
+        result = apply_actions_policy(
+            GitHubApi(),
+            organization,
+            policy,
+        )
+    except (ActionsPolicyError, GitHubApiError) as exc:
+        typer.echo(f"ERROR: {exc}", err=True)
+        raise typer.Exit(1) from exc
+
+    typer.echo(f"OK        {result.name}")

@@ -31,6 +31,15 @@ class GitHubApiReader(Protocol):
     def get_object(self, endpoint: str) -> JsonObject: ...
 
 
+class GitHubApiWriter(GitHubApiReader, Protocol):
+    def send_object(
+        self,
+        method: str,
+        endpoint: str,
+        payload: JsonObject,
+    ) -> JsonObject: ...
+
+
 def load_policy(path: Path) -> JsonObject:
     try:
         payload = cast(JsonValue, json.loads(path.read_text()))
@@ -172,3 +181,52 @@ def plan_actions_policy(
         desired=desired,
         actual=actual,
     )
+
+
+def apply_actions_policy(
+    api: GitHubApiWriter,
+    organization: str,
+    policy_path: Path,
+) -> ActionsPolicyPlan:
+    plan = plan_actions_policy(
+        api,
+        organization,
+        policy_path,
+    )
+
+    organization_path = quote(organization, safe="")
+
+    if plan.action is PlanAction.NO_CHANGE:
+        return plan
+
+    if plan.action is PlanAction.CREATE:
+        api.send_object(
+            "POST",
+            f"orgs/{organization_path}/actions/policies",
+            plan.desired,
+        )
+
+    elif plan.action is PlanAction.UPDATE:
+        if plan.policy_id is None:
+            raise ActionsPolicyError(
+                f"Cannot update Actions policy '{plan.name}' without an id"
+            )
+
+        api.send_object(
+            "PUT",
+            (f"orgs/{organization_path}/actions/policies/{plan.policy_id}"),
+            plan.desired,
+        )
+
+    verified = plan_actions_policy(
+        api,
+        organization,
+        policy_path,
+    )
+
+    if verified.action is not PlanAction.NO_CHANGE:
+        raise ActionsPolicyError(
+            f"Actions policy '{plan.name}' did not converge after apply"
+        )
+
+    return verified
