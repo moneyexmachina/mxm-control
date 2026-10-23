@@ -10,6 +10,13 @@ from mxm.control.github.actions_policy import (
     plan_actions_policy,
 )
 from mxm.control.github.api import GitHubApi, GitHubApiError
+from mxm.control.opentofu import (
+    OpenTofuCheckResult,
+    OpenTofuError,
+    apply_opentofu,
+    check_opentofu,
+    plan_opentofu,
+)
 
 app = typer.Typer(help="Reusable control mechanisms for the MXM computational estate.")
 
@@ -20,6 +27,91 @@ check_app = typer.Typer(help="Check realised state against desired state.")
 app.add_typer(plan_app, name="plan")
 app.add_typer(apply_app, name="apply")
 app.add_typer(check_app, name="check")
+
+
+@plan_app.command("opentofu")
+def plan_opentofu_command(
+    stack: Annotated[
+        Path,
+        typer.Option(
+            "--stack",
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            readable=True,
+        ),
+    ],
+    out: Annotated[Path, typer.Option("--out")],
+) -> None:
+    """Create a saved OpenTofu plan without modifying realised state."""
+    try:
+        plan = plan_opentofu(stack, out)
+    except OpenTofuError as exc:
+        typer.echo(f"ERROR: {exc}", err=True)
+        raise typer.Exit(1) from exc
+
+    typer.echo(f"OK        {plan}")
+
+
+@check_app.command("opentofu")
+def check_opentofu_command(
+    stack: Annotated[
+        Path,
+        typer.Option(
+            "--stack",
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            readable=True,
+        ),
+    ],
+) -> None:
+    """Check an OpenTofu stack for drift."""
+    try:
+        result = check_opentofu(stack)
+    except OpenTofuError as exc:
+        typer.echo(f"ERROR: {exc}", err=True)
+        raise typer.Exit(1) from exc
+
+    if result is OpenTofuCheckResult.NO_CHANGE:
+        typer.echo(f"OK        {stack.resolve()}")
+        return
+
+    typer.echo(f"DRIFT     {stack.resolve()}", err=True)
+    raise typer.Exit(2)
+
+
+@apply_app.command("opentofu")
+def apply_opentofu_command(
+    stack: Annotated[
+        Path,
+        typer.Option(
+            "--stack",
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            readable=True,
+        ),
+    ],
+    plan: Annotated[
+        Path,
+        typer.Option(
+            "--plan",
+            exists=True,
+            file_okay=True,
+            dir_okay=False,
+            readable=True,
+        ),
+    ],
+) -> None:
+    """Apply exactly one existing, reviewed OpenTofu plan."""
+    try:
+        applied_plan = apply_opentofu(stack, plan)
+    except OpenTofuError as exc:
+        typer.echo(f"ERROR: {exc}", err=True)
+        raise typer.Exit(1) from exc
+
+    typer.echo(f"OK        {applied_plan}")
 
 
 @plan_app.command("github-actions")
