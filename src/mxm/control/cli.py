@@ -43,10 +43,21 @@ def plan_opentofu_command(
         ),
     ],
     out: Annotated[Path, typer.Option("--out")],
+    environment_policy: Annotated[
+        Path,
+        typer.Option(
+            "--environment-policy",
+            exists=True,
+            file_okay=True,
+            dir_okay=False,
+            readable=True,
+            help="Authoritative operator environment policy.",
+        ),
+    ],
 ) -> None:
     """Create a saved OpenTofu plan without modifying realised state."""
     try:
-        plan = plan_opentofu(stack, out)
+        plan = plan_opentofu(stack, environment_policy, out)
     except OpenTofuError as exc:
         typer.echo(f"ERROR: {exc}", err=True)
         raise typer.Exit(1) from exc
@@ -66,10 +77,21 @@ def check_opentofu_command(
             readable=True,
         ),
     ],
+    environment_policy: Annotated[
+        Path,
+        typer.Option(
+            "--environment-policy",
+            exists=True,
+            file_okay=True,
+            dir_okay=False,
+            readable=True,
+            help="Authoritative operator environment policy.",
+        ),
+    ],
 ) -> None:
     """Check an OpenTofu stack for drift."""
     try:
-        result = check_opentofu(stack)
+        result = check_opentofu(stack, environment_policy=environment_policy)
     except OpenTofuError as exc:
         typer.echo(f"ERROR: {exc}", err=True)
         raise typer.Exit(1) from exc
@@ -94,6 +116,17 @@ def apply_opentofu_command(
             readable=True,
         ),
     ],
+    environment_policy: Annotated[
+        Path,
+        typer.Option(
+            "--environment-policy",
+            exists=True,
+            file_okay=True,
+            dir_okay=False,
+            readable=True,
+            help="Authoritative operator environment policy.",
+        ),
+    ],
     plan: Annotated[
         Path,
         typer.Option(
@@ -107,7 +140,7 @@ def apply_opentofu_command(
 ) -> None:
     """Apply exactly one existing, reviewed OpenTofu plan."""
     try:
-        applied_plan = apply_opentofu(stack, plan)
+        applied_plan = apply_opentofu(stack, environment_policy, plan)
     except OpenTofuError as exc:
         typer.echo(f"ERROR: {exc}", err=True)
         raise typer.Exit(1) from exc
@@ -227,18 +260,18 @@ def login_command() -> None:
 
 @app.command("status")
 def status_command() -> None:
-    """Report operator authentication session availability."""
+    """Report authentication status for all operator backends."""
     try:
-        available = operator.status()
+        result = operator.operator_status()
     except operator.OperatorError as exc:
         typer.echo(f"ERROR: {exc}", err=True)
         raise typer.Exit(1) from exc
 
-    if not available:
-        typer.echo("UNAUTHENTICATED    Proton Pass session unavailable", err=True)
-        raise typer.Exit(1)
+    typer.echo(f"{'OK' if result.proton_pass else 'UNAUTHENTICATED':<17} Proton Pass")
+    typer.echo(f"{'OK' if result.github else 'UNAUTHENTICATED':<17} GitHub CLI")
 
-    typer.echo("OK        Proton Pass session available")
+    if not result.authenticated:
+        raise typer.Exit(1)
 
 
 @app.command("logout")

@@ -10,6 +10,40 @@ Provider-specific credential resolution is a separate responsibility.
 """
 
 import subprocess
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class OperatorStatus:
+    """Authentication status of the MXM operator's authority backends.
+
+    Attributes:
+        proton_pass: Whether a Proton Pass session is available.
+        github: Whether GitHub CLI is authenticated.
+    """
+
+    proton_pass: bool
+    github: bool
+
+    @property
+    def authenticated(self) -> bool:
+        """Return whether all required operator backends are authenticated."""
+        return self.proton_pass and self.github
+
+
+def operator_status() -> OperatorStatus:
+    """Inspect all supported operator authentication backends.
+
+    Returns:
+        Authentication availability for Proton Pass and GitHub.
+
+    Raises:
+        OperatorError: If a backend's CLI cannot be executed.
+    """
+    return OperatorStatus(
+        proton_pass=status(),
+        github=github_status(),
+    )
 
 
 class OperatorError(RuntimeError):
@@ -44,22 +78,24 @@ def _run_pass_cli(*args: str) -> int:
 
 
 def login() -> None:
-    """Establish or reuse an authenticated operator session.
+    """Establish the operator's Proton Pass and GitHub sessions.
 
-    An existing Proton Pass session is reused when available.
-    Otherwise, Proton Pass performs its native interactive login.
+    Existing sessions are reused. Missing sessions are established
+    using each provider's native authentication mechanism.
 
     Raises:
-        OperatorError: If authentication cannot be established.
+        OperatorError: If either authentication backend fails.
     """
-    if status():
-        return
-
-    if _run_pass_cli("login") != 0:
-        raise OperatorError("Proton Pass login failed")
-
     if not status():
-        raise OperatorError("Proton Pass login completed without an available session")
+        if _run_pass_cli("login") != 0:
+            raise OperatorError("Proton Pass login failed")
+
+        if not status():
+            raise OperatorError(
+                "Proton Pass login completed without an available session"
+            )
+
+    github_login()
 
 
 def status() -> bool:
@@ -83,3 +119,60 @@ def logout() -> None:
     """
     if _run_pass_cli("logout") != 0:
         raise OperatorError("Proton Pass logout failed")
+
+
+def github_status() -> bool:
+    """Check whether GitHub CLI has an authenticated session.
+
+    Returns:
+        True if GitHub CLI reports an authenticated github.com session.
+
+    Raises:
+        OperatorError: If GitHub CLI cannot be executed.
+    """
+    return _run_gh("auth", "status", "--hostname", "github.com") == 0
+
+
+def github_login() -> None:
+    """Establish or reuse the GitHub operator session.
+
+    Existing authenticated GitHub CLI sessions are preserved.
+
+    Raises:
+        OperatorError: If GitHub authentication cannot be established.
+    """
+    if github_status():
+        return
+
+    if _run_gh("auth", "login", "--hostname", "github.com", "--web") != 0:
+        raise OperatorError("GitHub CLI login failed")
+
+    if not github_status():
+        raise OperatorError(
+            "GitHub CLI login completed without an authenticated session"
+        )
+
+
+def _run_gh(*args: str) -> int:
+    """Execute a GitHub CLI authentication command.
+
+    Args:
+        *args: Arguments passed to ``gh``.
+
+    Returns:
+        The subprocess exit status.
+
+    Raises:
+        OperatorError: If GitHub CLI cannot be executed.
+    """
+    try:
+        completed = subprocess.run(
+            ["gh", *args],
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise OperatorError("GitHub CLI is not installed") from exc
+    except OSError as exc:
+        raise OperatorError(f"Unable to execute GitHub CLI: {exc}") from exc
+
+    return completed.returncode

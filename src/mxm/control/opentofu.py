@@ -80,6 +80,7 @@ def _run(
     command: list[str],
     *,
     stack: Path,
+    environment_policy: Path,
     restrictive_umask: bool = False,
 ) -> int:
     """Execute OpenTofu with credentials declared by the estate stack.
@@ -100,13 +101,14 @@ def _run(
         return run_with_credentials(
             command,
             stack=stack,
+            environment_policy=environment_policy,
             restrictive_umask=restrictive_umask,
         )
     except CredentialError as exc:
         raise OpenTofuError(f"OpenTofu execution failed: {exc}") from exc
 
 
-def plan_opentofu(stack: Path, plan: Path) -> Path:
+def plan_opentofu(stack: Path, environment_policy: Path, plan: Path) -> Path:
     """Create a saved OpenTofu plan without modifying realised state."""
     stack_path = _validated_stack(stack)
     plan_path = _new_plan_path(plan)
@@ -120,6 +122,7 @@ def plan_opentofu(stack: Path, plan: Path) -> Path:
             f"-out={plan_path}",
         ],
         stack=stack_path,
+        environment_policy=environment_policy,
         restrictive_umask=True,
     )
 
@@ -149,7 +152,11 @@ def plan_opentofu(stack: Path, plan: Path) -> Path:
     return plan_path
 
 
-def check_opentofu(stack: Path) -> OpenTofuCheckResult:
+def check_opentofu(
+    stack: Path,
+    *,
+    environment_policy: Path,
+) -> OpenTofuCheckResult:
     """Check an OpenTofu stack for drift without saving a plan."""
     stack_path = _validated_stack(stack)
 
@@ -162,6 +169,7 @@ def check_opentofu(stack: Path) -> OpenTofuCheckResult:
             "-detailed-exitcode",
         ],
         stack=stack_path,
+        environment_policy=environment_policy,
     )
 
     if returncode == 0:
@@ -172,7 +180,7 @@ def check_opentofu(stack: Path) -> OpenTofuCheckResult:
     raise OpenTofuError(f"OpenTofu check failed with exit status {returncode}")
 
 
-def apply_opentofu(stack: Path, plan: Path) -> Path:
+def apply_opentofu(stack: Path, environment_policy: Path, plan: Path) -> Path:
     """Apply exactly one existing, reviewed OpenTofu plan."""
     stack_path = _validated_stack(stack)
     plan_path = _existing_plan_path(plan)
@@ -185,6 +193,7 @@ def apply_opentofu(stack: Path, plan: Path) -> Path:
             "-input=false",
             str(plan_path),
         ],
+        environment_policy=environment_policy,
         stack=stack_path,
     )
 

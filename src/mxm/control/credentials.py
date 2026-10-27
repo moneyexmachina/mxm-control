@@ -20,6 +20,7 @@ import stat
 import subprocess
 import tomllib
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
@@ -71,6 +72,165 @@ def _validate_reference(reference: str) -> None:
 
     if any(ord(character) < 32 or ord(character) == 127 for character in field):
         raise CredentialError("Credential reference field contains a control character")
+
+
+@dataclass(frozen=True)
+class EnvironmentPolicy:
+    """Rules governing inheritance of the operator environment.
+
+    Attributes:
+        strip: Exact environment variable names to remove.
+        strip_prefixes: Variable-name prefixes to remove.
+    """
+
+    strip: frozenset[str]
+    strip_prefixes: tuple[str, ...]
+
+
+def _validate_environment_names(
+    values: object,
+    *,
+    field: str,
+    allow_prefix: bool = False,
+) -> tuple[str, ...]:
+    """Validate exact environment names or environment-name prefixes.
+
+    Args:
+        values: Parsed TOML array.
+        field: Policy field name used in diagnostic messages.
+        allow_prefix: Whether incomplete environment names are allowed.
+
+    Returns:
+        Validated environment names or prefixes.
+
+    Raises:
+        CredentialError: If the declaration is malformed or duplicated.
+    """
+    if not isinstance(values, list):
+        raise CredentialError(f"{field} must be an array")
+
+    raw_values = cast("list[object]", values)
+
+    names: list[str] = []
+
+    for value in raw_values:
+        if not isinstance(value, str) or not value:
+            raise CredentialError(f"{field} must contain non-empty strings")
+
+        if not _ENVIRONMENT_NAME_PATTERN.fullmatch(value):
+            raise CredentialError(
+                f"Invalid environment name or prefix in {field}: {value!r}"
+            )
+
+        names.append(value)
+
+    if len(names) != len(set(names)):
+        raise CredentialError(f"Duplicate entries in {field}")
+
+    return tuple(names)
+
+
+def _read_environment_policy(path: Path) -> dict[str, object]:
+    """Read the environment policy as a TOML document.
+
+    Raises:
+        CredentialError: If the file is missing, invalid, or unreadable.
+    """
+    expanded = path.expanduser()
+
+    if expanded.is_symlink():
+        raise CredentialError(
+            f"Environment policy must not be a symbolic link: {expanded}"
+        )
+
+    try:
+        resolved = expanded.resolve(strict=True)
+
+        if not resolved.is_file():
+            raise CredentialError(
+                f"Environment policy is not a regular file: {resolved}"
+            )
+
+        with resolved.open("rb") as stream:
+            parsed = tomllib.load(stream)
+
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise CredentialError(f"Unable to read environment policy: {expanded}") from exc
+
+    return cast("dict[str, object]", parsed)
+
+
+def _get_inheritance_table(
+    document: dict[str, object],
+) -> dict[str, object]:
+    """Extract the required inheritance table from a policy document."""
+    if set(document) != {"inheritance"}:
+        raise CredentialError(
+            "Environment policy must contain only an [inheritance] table"
+        )
+
+    inheritance = document["inheritance"]
+
+    if not isinstance(inheritance, dict):
+        raise CredentialError("Environment policy [inheritance] must be a table")
+
+    table = cast("dict[str, object]", inheritance)
+
+    if set(table) != {"strip", "strip_prefixes"}:
+        raise CredentialError("Environment policy requires strip and strip_prefixes")
+
+    return table
+
+
+def load_environment_policy(path: Path) -> EnvironmentPolicy:
+    """Load and validate an authoritative operator environment policy."""
+    document = _read_environment_policy(path)
+    inheritance = _get_inheritance_table(document)
+
+    names = _validate_environment_names(
+        inheritance["strip"],
+        field="strip",
+    )
+    prefixes = _validate_environment_names(
+        inheritance["strip_prefixes"],
+        field="strip_prefixes",
+    )
+
+    for name in names:
+        if any(name.startswith(prefix) for prefix in prefixes):
+            raise CredentialError(f"Redundant environment strip declaration: {name}")
+
+    for prefix in prefixes:
+        if any(prefix != other and prefix.startswith(other) for other in prefixes):
+            raise CredentialError(f"Redundant environment strip prefix: {prefix}")
+
+    return EnvironmentPolicy(
+        strip=frozenset(names),
+        strip_prefixes=prefixes,
+    )
+
+
+def filter_environment(
+    environment: Mapping[str, str],
+    policy: EnvironmentPolicy,
+) -> dict[str, str]:
+    """Remove inherited variables prohibited by an estate policy.
+
+    Args:
+        environment: Original process environment.
+        policy: Validated inheritance policy.
+
+    Returns:
+        A new filtered environment mapping.
+
+    The input mapping is not modified.
+    """
+    return {
+        name: value
+        for name, value in environment.items()
+        if name not in policy.strip
+        and not any(name.startswith(prefix) for prefix in policy.strip_prefixes)
+    }
 
 
 def _validate_bindings(data: object) -> dict[str, str]:
@@ -188,6 +348,7 @@ def run_with_credentials(
     command: Sequence[str],
     *,
     stack: Path,
+    environment_policy: Path,
     restrictive_umask: bool = False,
 ) -> int:
     """Execute a command with stack-declared operator credentials.
@@ -216,13 +377,21 @@ def run_with_credentials(
     if not command:
         raise CredentialError("Cannot execute an empty command")
 
+    # Validate the authority policy before attempting execution.
+    policy = load_environment_policy(environment_policy)
+
+    # Load concrete credentials declared by the selected stack.
     bindings = load_credentials(stack)
 
-    environment: Mapping[str, str] | None = None
+    # First remove prohibited inherited authority.
+    environment = filter_environment(os.environ, policy)
+
+    # Then add explicitly declared Proton Pass references.
+    environment.update(bindings)
+
     executable = list(command)
 
     if bindings:
-        environment = {**os.environ, **bindings}
         executable = ["pass-cli", "run", "--", *executable]
 
     try:

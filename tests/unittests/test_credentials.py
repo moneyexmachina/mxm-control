@@ -213,18 +213,24 @@ def test_non_string_binding_is_rejected(tmp_path: Path) -> None:
         credentials.load_credentials(tmp_path)
 
 
-def test_empty_command_is_rejected(tmp_path: Path) -> None:
+def test_empty_command_is_rejected(
+    tmp_path: Path,
+    environment_policy: Path,
+) -> None:
     """The execution mechanism must reject an empty command."""
     with pytest.raises(
         credentials.CredentialError,
         match="Cannot execute an empty command",
     ):
-        credentials.run_with_credentials([], stack=tmp_path)
+        credentials.run_with_credentials(
+            [], stack=tmp_path, environment_policy=environment_policy
+        )
 
 
 def test_command_without_manifest_runs_directly(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    environment_policy: Path,
 ) -> None:
     """A credential-free operation must not require Proton Pass."""
     observed: dict[str, Any] = {}
@@ -238,21 +244,33 @@ def test_command_without_manifest_runs_directly(
         return completed(0)
 
     monkeypatch.setattr(credentials.subprocess, "run", fake_run)
-
+    monkeypatch.setenv("GITHUB_TOKEN", "unwanted")
+    monkeypatch.setenv("HCLOUD_TOKEN", "unwanted")
+    monkeypatch.setenv("TF_VAR_unwanted", "unwanted")
+    monkeypatch.setenv("MXM_TEST_PRESERVED", "preserved")
     result = credentials.run_with_credentials(
         ["tofu", "version"],
         stack=tmp_path,
+        environment_policy=environment_policy,
     )
 
     assert result == 0
     assert observed["command"] == ["tofu", "version"]
-    assert observed["kwargs"]["env"] is None
+    environment = observed["kwargs"]["env"]
+
+    assert isinstance(environment, dict)
+
     assert observed["kwargs"]["check"] is False
+    assert "GITHUB_TOKEN" not in environment
+    assert "HCLOUD_TOKEN" not in environment
+    assert "TF_VAR_unwanted" not in environment
+    assert environment["MXM_TEST_PRESERVED"] == "preserved"
 
 
 def test_command_with_bindings_uses_pass_cli(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    environment_policy: Path,
 ) -> None:
     """Declared references are passed to Proton Pass for resolution."""
     write_manifest(tmp_path, valid_manifest())
@@ -272,6 +290,7 @@ def test_command_with_bindings_uses_pass_cli(
     result = credentials.run_with_credentials(
         ["tofu", "plan", "-input=false"],
         stack=tmp_path,
+        environment_policy=environment_policy,
     )
 
     assert result == 0
@@ -295,6 +314,7 @@ def test_command_with_bindings_uses_pass_cli(
 def test_declared_binding_overrides_inherited_environment(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    environment_policy: Path,
 ) -> None:
     """Stack declarations override matching inherited variable names."""
     write_manifest(
@@ -318,6 +338,7 @@ def test_declared_binding_overrides_inherited_environment(
     credentials.run_with_credentials(
         ["tofu", "plan"],
         stack=tmp_path,
+        environment_policy=environment_policy,
     )
 
     assert observed["environment"]["HCLOUD_TOKEN"] == HCLOUD_REFERENCE
@@ -326,6 +347,7 @@ def test_declared_binding_overrides_inherited_environment(
 def test_unrelated_environment_is_preserved(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    environment_policy: Path,
 ) -> None:
     """The initial implementation preserves unrelated shell variables."""
     write_manifest(
@@ -349,6 +371,7 @@ def test_unrelated_environment_is_preserved(
     credentials.run_with_credentials(
         ["tofu", "plan"],
         stack=tmp_path,
+        environment_policy=environment_policy,
     )
 
     assert observed["environment"]["MXM_SYNTHETIC_TEST_VARIABLE"] == "test-value"
@@ -358,6 +381,7 @@ def test_unrelated_environment_is_preserved(
 def test_subprocess_exit_status_is_preserved(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    environment_policy: Path,
     returncode: int,
 ) -> None:
     """Execution returns the subprocess status without reinterpretation."""
@@ -375,6 +399,7 @@ def test_subprocess_exit_status_is_preserved(
         credentials.run_with_credentials(
             ["tofu", "plan"],
             stack=tmp_path,
+            environment_policy=environment_policy,
         )
         == returncode
     )
@@ -383,6 +408,7 @@ def test_subprocess_exit_status_is_preserved(
 def test_restrictive_umask_is_forwarded(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    environment_policy: Path,
 ) -> None:
     """Credential-bound operations preserve owner-only file creation."""
     write_manifest(tmp_path, valid_manifest())
@@ -401,6 +427,7 @@ def test_restrictive_umask_is_forwarded(
     credentials.run_with_credentials(
         ["tofu", "plan"],
         stack=tmp_path,
+        environment_policy=environment_policy,
         restrictive_umask=True,
     )
 
@@ -410,6 +437,7 @@ def test_restrictive_umask_is_forwarded(
 def test_default_umask_is_inherited(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    environment_policy: Path,
 ) -> None:
     """Normal operations retain the caller's existing file creation mask."""
     observed: dict[str, Any] = {}
@@ -426,6 +454,7 @@ def test_default_umask_is_inherited(
     credentials.run_with_credentials(
         ["tofu", "version"],
         stack=tmp_path,
+        environment_policy=environment_policy,
     )
 
     assert observed["umask"] == -1
@@ -434,6 +463,7 @@ def test_default_umask_is_inherited(
 def test_missing_pass_cli_is_reported(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    environment_policy: Path,
 ) -> None:
     """A missing credential resolver produces a controlled failure."""
     write_manifest(tmp_path, valid_manifest())
@@ -450,12 +480,14 @@ def test_missing_pass_cli_is_reported(
         credentials.run_with_credentials(
             ["tofu", "plan"],
             stack=tmp_path,
+            environment_policy=environment_policy,
         )
 
 
 def test_subprocess_os_error_is_reported(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    environment_policy: Path,
 ) -> None:
     """OS-level execution failures raise CredentialError."""
     write_manifest(tmp_path, valid_manifest())
@@ -472,12 +504,14 @@ def test_subprocess_os_error_is_reported(
         credentials.run_with_credentials(
             ["tofu", "plan"],
             stack=tmp_path,
+            environment_policy=environment_policy,
         )
 
 
 def test_invalid_manifest_prevents_command_execution(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    environment_policy: Path,
 ) -> None:
     """Invalid credentials must fail before any subprocess is started."""
     write_manifest(
@@ -494,4 +528,186 @@ def test_invalid_manifest_prevents_command_execution(
         credentials.run_with_credentials(
             ["tofu", "plan"],
             stack=tmp_path,
+            environment_policy=environment_policy,
         )
+
+
+@pytest.mark.parametrize(
+    "contents",
+    [
+        "",
+        "[other]\nstrip = []\n",
+        "[inheritance]\nstrip = []\n",
+        '[inheritance]\nstrip = "HCLOUD_TOKEN"\nstrip_prefixes = []\n',
+        "[inheritance]\nstrip = [123]\nstrip_prefixes = []\n",
+        '[inheritance]\nstrip = ["INVALID-NAME"]\nstrip_prefixes = []\n',
+        '[inheritance]\nstrip = ["HCLOUD_TOKEN", "HCLOUD_TOKEN"]\nstrip_prefixes = []\n',
+        '[inheritance]\nstrip = []\nstrip_prefixes = [""]\n',
+        '[inheritance]\nstrip = []\nstrip_prefixes = ["TF_VAR_", "TF_VAR_"]\n',
+        '[inheritance]\nstrip = ["TF_VAR_secret"]\nstrip_prefixes = ["TF_VAR_"]\n',
+        '[inheritance]\nstrip = []\nstrip_prefixes = ["TF_", "TF_VAR_"]\n',
+        "[inheritance\n",
+    ],
+)
+def test_environment_policy_rejects_invalid_declarations(
+    tmp_path: Path,
+    contents: str,
+) -> None:
+    """Reject malformed or ambiguous environment policies."""
+    policy_path = tmp_path / "environment.toml"
+    policy_path.write_text(contents, encoding="utf-8")
+
+    with pytest.raises(credentials.CredentialError):
+        credentials.load_environment_policy(policy_path)
+
+
+def test_environment_policy_rejects_missing_file(
+    tmp_path: Path,
+) -> None:
+    """A missing policy must not silently enable unrestricted inheritance."""
+    with pytest.raises(credentials.CredentialError):
+        credentials.load_environment_policy(tmp_path / "missing-environment.toml")
+
+
+def test_environment_policy_rejects_symlink(
+    tmp_path: Path,
+    environment_policy: Path,
+) -> None:
+    """Reject a symbolic link supplied as the policy file."""
+    link = tmp_path / "environment-link.toml"
+    link.symlink_to(environment_policy)
+
+    with pytest.raises(
+        credentials.CredentialError,
+        match="symbolic link",
+    ):
+        credentials.load_environment_policy(link)
+
+
+def test_filter_environment_removes_prohibited_inheritance(
+    environment_policy: Path,
+) -> None:
+    """Remove prohibited names and prefixes while preserving other variables."""
+    policy = credentials.load_environment_policy(environment_policy)
+
+    inherited = {
+        "PATH": "/usr/bin",
+        "HOME": "/home/operator",
+        "HCLOUD_TOKEN": "inherited-hetzner",
+        "GITHUB_TOKEN": "inherited-github",
+        "GH_TOKEN": "inherited-gh",
+        "TF_VAR_secret": "inherited-input",
+        "TF_CLI_ARGS_plan": "-lock=false",
+        "MXM_TEST_PRESERVED": "preserved",
+    }
+
+    result = credentials.filter_environment(inherited, policy)
+
+    assert result == {
+        "PATH": "/usr/bin",
+        "HOME": "/home/operator",
+        "MXM_TEST_PRESERVED": "preserved",
+    }
+
+    # Filtering must not mutate the operator's original environment.
+    assert inherited["HCLOUD_TOKEN"] == "inherited-hetzner"
+    assert inherited["TF_VAR_secret"] == "inherited-input"
+
+
+def test_declared_credentials_replace_inherited_values(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    environment_policy: Path,
+) -> None:
+    """Explicit bindings replace inherited provider credentials."""
+    stack = tmp_path / "stack"
+    stack.mkdir()
+
+    reference = "pass://test-share/test-item/API-key"
+
+    (stack / "credentials.toml").write_text(
+        f'[environment]\nHCLOUD_TOKEN = "{reference}"\n',
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("HCLOUD_TOKEN", "inherited-secret")
+    monkeypatch.setenv("GITHUB_TOKEN", "unrelated-inherited-secret")
+    monkeypatch.setenv("MXM_TEST_PRESERVED", "preserved")
+
+    observed: dict[str, object] = {}
+
+    def fake_run(
+        command: list[str],
+        **kwargs: Any,
+    ) -> subprocess.CompletedProcess[str]:
+        observed["command"] = command
+        observed["environment"] = kwargs["env"]
+        return completed(0)
+
+    monkeypatch.setattr(credentials.subprocess, "run", fake_run)
+
+    result = credentials.run_with_credentials(
+        ["tofu", "version"],
+        stack=stack,
+        environment_policy=environment_policy,
+    )
+
+    assert result == 0
+    assert observed["command"] == [
+        "pass-cli",
+        "run",
+        "--",
+        "tofu",
+        "version",
+    ]
+
+    environment = observed["environment"]
+    assert isinstance(environment, dict)
+
+    assert environment["HCLOUD_TOKEN"] == reference
+    assert "GITHUB_TOKEN" not in environment
+    assert environment["MXM_TEST_PRESERVED"] == "preserved"
+
+
+@pytest.mark.parametrize(
+    "contents",
+    [
+        None,
+        "",
+        "[inheritance]\nstrip = []\n",
+        '[inheritance]\nstrip = ["HCLOUD_TOKEN", "HCLOUD_TOKEN"]\nstrip_prefixes = []\n',
+    ],
+)
+def test_invalid_environment_policy_prevents_execution(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    contents: str | None,
+) -> None:
+    """Invalid or missing policy must stop execution before subprocess creation."""
+    stack = tmp_path / "stack"
+    stack.mkdir()
+
+    policy_path = tmp_path / "environment.toml"
+
+    if contents is not None:
+        policy_path.write_text(contents, encoding="utf-8")
+
+    observed: list[list[str]] = []
+
+    def fake_run(
+        command: list[str],
+        **kwargs: Any,
+    ) -> subprocess.CompletedProcess[str]:
+        observed.append(command)
+        return completed(0)
+
+    monkeypatch.setattr(credentials.subprocess, "run", fake_run)
+
+    with pytest.raises(credentials.CredentialError):
+        credentials.run_with_credentials(
+            ["tofu", "version"],
+            stack=stack,
+            environment_policy=policy_path,
+        )
+
+    assert observed == []
