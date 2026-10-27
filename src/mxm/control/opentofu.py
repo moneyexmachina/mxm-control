@@ -1,8 +1,9 @@
 import os
 import stat
-import subprocess
 from enum import Enum
 from pathlib import Path
+
+from mxm.control.credentials import CredentialError, run_with_credentials
 
 
 class OpenTofuError(RuntimeError):
@@ -75,19 +76,34 @@ def _existing_plan_path(plan: Path) -> Path:
     return resolved
 
 
-def _run(command: list[str], *, restrictive_umask: bool = False) -> int:
-    try:
-        completed = subprocess.run(
-            command,
-            check=False,
-            umask=0o077 if restrictive_umask else -1,
-        )
-    except FileNotFoundError as exc:
-        raise OpenTofuError("OpenTofu executable not found: tofu") from exc
-    except OSError as exc:
-        raise OpenTofuError(f"unable to execute OpenTofu: {exc}") from exc
+def _run(
+    command: list[str],
+    *,
+    stack: Path,
+    restrictive_umask: bool = False,
+) -> int:
+    """Execute OpenTofu with credentials declared by the estate stack.
 
-    return completed.returncode
+    Args:
+        command: OpenTofu executable and command arguments.
+        stack: Stack directory containing optional credential bindings.
+        restrictive_umask: Whether to restrict newly created files
+            to owner-only permissions.
+
+    Returns:
+        The subprocess exit status.
+
+    Raises:
+        OpenTofuError: If credential resolution or execution fails.
+    """
+    try:
+        return run_with_credentials(
+            command,
+            stack=stack,
+            restrictive_umask=restrictive_umask,
+        )
+    except CredentialError as exc:
+        raise OpenTofuError(f"OpenTofu execution failed: {exc}") from exc
 
 
 def plan_opentofu(stack: Path, plan: Path) -> Path:
@@ -103,6 +119,7 @@ def plan_opentofu(stack: Path, plan: Path) -> Path:
             "-input=false",
             f"-out={plan_path}",
         ],
+        stack=stack_path,
         restrictive_umask=True,
     )
 
@@ -143,7 +160,8 @@ def check_opentofu(stack: Path) -> OpenTofuCheckResult:
             "plan",
             "-input=false",
             "-detailed-exitcode",
-        ]
+        ],
+        stack=stack_path,
     )
 
     if returncode == 0:
@@ -166,7 +184,8 @@ def apply_opentofu(stack: Path, plan: Path) -> Path:
             "apply",
             "-input=false",
             str(plan_path),
-        ]
+        ],
+        stack=stack_path,
     )
 
     if returncode != 0:

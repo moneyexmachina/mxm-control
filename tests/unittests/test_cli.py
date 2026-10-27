@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from mxm.control import operator
 from mxm.control.cli import app
 from mxm.control.github.actions_policy import (
     ActionsPolicyError,
@@ -321,3 +322,111 @@ def test_apply_github_actions_reports_failure(
 
     assert result.exit_code == 1
     assert "ERROR: policy did not converge" in result.output
+
+
+def test_login_reuses_or_establishes_operator_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Login delegates authentication to the operator module."""
+    calls: list[str] = []
+
+    def fake_login() -> None:
+        calls.append("login")
+
+    monkeypatch.setattr("mxm.control.cli.operator.login", fake_login)
+
+    result = runner.invoke(app, ["login"])
+
+    assert result.exit_code == 0
+    assert calls == ["login"]
+    assert "Proton Pass session available" in result.stdout
+
+
+def test_login_reports_authentication_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Login reports an operator authentication failure."""
+
+    def fake_login() -> None:
+        raise operator.OperatorError("Proton Pass login failed")
+
+    monkeypatch.setattr("mxm.control.cli.operator.login", fake_login)
+
+    result = runner.invoke(app, ["login"])
+
+    assert result.exit_code == 1
+    assert "ERROR: Proton Pass login failed" in result.output
+
+
+def test_status_reports_available_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Status succeeds when an operator session exists."""
+    monkeypatch.setattr("mxm.control.cli.operator.status", lambda: True)
+
+    result = runner.invoke(app, ["status"])
+
+    assert result.exit_code == 0
+    assert "Proton Pass session available" in result.stdout
+
+
+def test_status_reports_unavailable_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Status fails when no operator session is available."""
+    monkeypatch.setattr("mxm.control.cli.operator.status", lambda: False)
+
+    result = runner.invoke(app, ["status"])
+
+    assert result.exit_code == 1
+    assert "UNAUTHENTICATED" in result.output
+
+
+def test_status_reports_operator_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Status reports execution failures without exposing credentials."""
+
+    def fake_status() -> bool:
+        raise operator.OperatorError("Proton Pass CLI is not installed")
+
+    monkeypatch.setattr("mxm.control.cli.operator.status", fake_status)
+
+    result = runner.invoke(app, ["status"])
+
+    assert result.exit_code == 1
+    assert "ERROR: Proton Pass CLI is not installed" in result.output
+
+
+def test_logout_terminates_operator_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Logout delegates session termination to the operator module."""
+    calls: list[str] = []
+
+    def fake_logout() -> None:
+        calls.append("logout")
+
+    monkeypatch.setattr("mxm.control.cli.operator.logout", fake_logout)
+
+    result = runner.invoke(app, ["logout"])
+
+    assert result.exit_code == 0
+    assert calls == ["logout"]
+    assert "Proton Pass session terminated" in result.stdout
+
+
+def test_logout_reports_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Logout reports failures without claiming session termination."""
+
+    def fake_logout() -> None:
+        raise operator.OperatorError("Proton Pass logout failed")
+
+    monkeypatch.setattr("mxm.control.cli.operator.logout", fake_logout)
+
+    result = runner.invoke(app, ["logout"])
+
+    assert result.exit_code == 1
+    assert "ERROR: Proton Pass logout failed" in result.output

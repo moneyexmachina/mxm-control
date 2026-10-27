@@ -3,6 +3,7 @@ from typing import Annotated
 
 import typer
 
+from mxm.control import operator
 from mxm.control.github.actions_policy import (
     ActionsPolicyError,
     PlanAction,
@@ -210,3 +211,43 @@ def apply_github_actions(
         raise typer.Exit(1) from exc
 
     typer.echo(f"OK        {result.name}")
+
+
+@app.command("login")
+def login_command() -> None:
+    """Establish or reuse the authenticated operator session."""
+    try:
+        operator.login()
+    except operator.OperatorError as exc:
+        typer.echo(f"ERROR: {exc}", err=True)
+        raise typer.Exit(1) from exc
+
+    typer.echo("OK        Proton Pass session available")
+
+
+@app.command("status")
+def status_command() -> None:
+    """Report operator authentication session availability."""
+    try:
+        available = operator.status()
+    except operator.OperatorError as exc:
+        typer.echo(f"ERROR: {exc}", err=True)
+        raise typer.Exit(1) from exc
+
+    if not available:
+        typer.echo("UNAUTHENTICATED    Proton Pass session unavailable", err=True)
+        raise typer.Exit(1)
+
+    typer.echo("OK        Proton Pass session available")
+
+
+@app.command("logout")
+def logout_command() -> None:
+    """Terminate the authenticated operator session."""
+    try:
+        operator.logout()
+    except operator.OperatorError as exc:
+        typer.echo(f"ERROR: {exc}", err=True)
+        raise typer.Exit(1) from exc
+
+    typer.echo("OK        Proton Pass session terminated")
