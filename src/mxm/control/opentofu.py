@@ -1,8 +1,9 @@
 import os
 import stat
-import subprocess
 from enum import Enum
 from pathlib import Path
+
+from mxm.control.credentials import CredentialError, run_with_credentials
 
 
 class OpenTofuError(RuntimeError):
@@ -75,22 +76,39 @@ def _existing_plan_path(plan: Path) -> Path:
     return resolved
 
 
-def _run(command: list[str], *, restrictive_umask: bool = False) -> int:
+def _run(
+    command: list[str],
+    *,
+    stack: Path,
+    environment_policy: Path,
+    restrictive_umask: bool = False,
+) -> int:
+    """Execute OpenTofu with credentials declared by the estate stack.
+
+    Args:
+        command: OpenTofu executable and command arguments.
+        stack: Stack directory containing optional credential bindings.
+        restrictive_umask: Whether to restrict newly created files
+            to owner-only permissions.
+
+    Returns:
+        The subprocess exit status.
+
+    Raises:
+        OpenTofuError: If credential resolution or execution fails.
+    """
     try:
-        completed = subprocess.run(
+        return run_with_credentials(
             command,
-            check=False,
-            umask=0o077 if restrictive_umask else -1,
+            stack=stack,
+            environment_policy=environment_policy,
+            restrictive_umask=restrictive_umask,
         )
-    except FileNotFoundError as exc:
-        raise OpenTofuError("OpenTofu executable not found: tofu") from exc
-    except OSError as exc:
-        raise OpenTofuError(f"unable to execute OpenTofu: {exc}") from exc
-
-    return completed.returncode
+    except CredentialError as exc:
+        raise OpenTofuError(f"OpenTofu execution failed: {exc}") from exc
 
 
-def plan_opentofu(stack: Path, plan: Path) -> Path:
+def plan_opentofu(stack: Path, environment_policy: Path, plan: Path) -> Path:
     """Create a saved OpenTofu plan without modifying realised state."""
     stack_path = _validated_stack(stack)
     plan_path = _new_plan_path(plan)
@@ -103,6 +121,8 @@ def plan_opentofu(stack: Path, plan: Path) -> Path:
             "-input=false",
             f"-out={plan_path}",
         ],
+        stack=stack_path,
+        environment_policy=environment_policy,
         restrictive_umask=True,
     )
 
@@ -132,7 +152,11 @@ def plan_opentofu(stack: Path, plan: Path) -> Path:
     return plan_path
 
 
-def check_opentofu(stack: Path) -> OpenTofuCheckResult:
+def check_opentofu(
+    stack: Path,
+    *,
+    environment_policy: Path,
+) -> OpenTofuCheckResult:
     """Check an OpenTofu stack for drift without saving a plan."""
     stack_path = _validated_stack(stack)
 
@@ -143,7 +167,9 @@ def check_opentofu(stack: Path) -> OpenTofuCheckResult:
             "plan",
             "-input=false",
             "-detailed-exitcode",
-        ]
+        ],
+        stack=stack_path,
+        environment_policy=environment_policy,
     )
 
     if returncode == 0:
@@ -154,7 +180,7 @@ def check_opentofu(stack: Path) -> OpenTofuCheckResult:
     raise OpenTofuError(f"OpenTofu check failed with exit status {returncode}")
 
 
-def apply_opentofu(stack: Path, plan: Path) -> Path:
+def apply_opentofu(stack: Path, environment_policy: Path, plan: Path) -> Path:
     """Apply exactly one existing, reviewed OpenTofu plan."""
     stack_path = _validated_stack(stack)
     plan_path = _existing_plan_path(plan)
@@ -166,7 +192,9 @@ def apply_opentofu(stack: Path, plan: Path) -> Path:
             "apply",
             "-input=false",
             str(plan_path),
-        ]
+        ],
+        environment_policy=environment_policy,
+        stack=stack_path,
     )
 
     if returncode != 0:

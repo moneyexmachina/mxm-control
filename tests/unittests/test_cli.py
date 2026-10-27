@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from mxm.control import operator
 from mxm.control.cli import app
 from mxm.control.github.actions_policy import (
     ActionsPolicyError,
@@ -34,12 +35,13 @@ def test_plan_help_exposes_opentofu() -> None:
 def test_plan_opentofu_reports_saved_plan(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    environment_policy: Path,
 ) -> None:
     stack = tmp_path / "stack"
     stack.mkdir()
     plan = tmp_path / "reviewed.plan"
 
-    def fake_plan_opentofu(stack: Path, plan: Path) -> Path:
+    def fake_plan_opentofu(stack: Path, environment_policy: Path, plan: Path) -> Path:
         return plan.resolve()
 
     monkeypatch.setattr("mxm.control.cli.plan_opentofu", fake_plan_opentofu)
@@ -53,6 +55,8 @@ def test_plan_opentofu_reports_saved_plan(
             str(stack),
             "--out",
             str(plan),
+            "--environment-policy",
+            str(environment_policy),
         ],
     )
 
@@ -64,18 +68,30 @@ def test_plan_opentofu_reports_saved_plan(
 def test_check_opentofu_reports_drift_with_distinct_exit_status(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    environment_policy: Path,
 ) -> None:
     stack = tmp_path / "stack"
     stack.mkdir()
 
-    def fake_check_opentofu(stack: Path) -> OpenTofuCheckResult:
+    def fake_check_opentofu(
+        stack: Path, environment_policy: Path
+    ) -> OpenTofuCheckResult:
+        _ = (stack,)
+        _ = environment_policy
         return OpenTofuCheckResult.DRIFT
 
     monkeypatch.setattr("mxm.control.cli.check_opentofu", fake_check_opentofu)
 
     result = runner.invoke(
         app,
-        ["check", "opentofu", "--stack", str(stack)],
+        [
+            "check",
+            "opentofu",
+            "--stack",
+            str(stack),
+            "--environment-policy",
+            str(environment_policy),
+        ],
     )
 
     assert result.exit_code == 2
@@ -85,18 +101,29 @@ def test_check_opentofu_reports_drift_with_distinct_exit_status(
 def test_check_opentofu_reports_execution_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    environment_policy: Path,
 ) -> None:
     stack = tmp_path / "stack"
     stack.mkdir()
 
-    def fail(stack: Path) -> OpenTofuCheckResult:
+    def fail(
+        stack: Path,
+        environment_policy: Path,
+    ) -> OpenTofuCheckResult:
         raise OpenTofuError("OpenTofu check failed with exit status 1")
 
     monkeypatch.setattr("mxm.control.cli.check_opentofu", fail)
 
     result = runner.invoke(
         app,
-        ["check", "opentofu", "--stack", str(stack)],
+        [
+            "check",
+            "opentofu",
+            "--stack",
+            str(stack),
+            "--environment-policy",
+            str(environment_policy),
+        ],
     )
 
     assert result.exit_code == 1
@@ -106,6 +133,7 @@ def test_check_opentofu_reports_execution_failure(
 def test_apply_opentofu_routes_existing_plan(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    environment_policy: Path,
 ) -> None:
     stack = tmp_path / "stack"
     stack.mkdir()
@@ -113,8 +141,13 @@ def test_apply_opentofu_routes_existing_plan(
     plan.write_bytes(b"saved plan")
     observed: dict[str, Path] = {}
 
-    def fake_apply(stack: Path, plan: Path) -> Path:
+    def fake_apply(
+        stack: Path,
+        environment_policy: Path,
+        plan: Path,
+    ) -> Path:
         observed["stack"] = stack
+        observed["environment_policy"] = environment_policy
         observed["plan"] = plan
         return plan.resolve()
 
@@ -129,12 +162,19 @@ def test_apply_opentofu_routes_existing_plan(
             str(stack),
             "--plan",
             str(plan),
+            "--environment-policy",
+            str(environment_policy),
         ],
     )
 
     assert result.exit_code == 0
-    assert observed == {"stack": stack, "plan": plan}
+    assert observed == {
+        "stack": stack,
+        "environment_policy": environment_policy,
+        "plan": plan,
+    }
     assert "OK" in result.stdout
+    assert observed["environment_policy"] == environment_policy
 
 
 def test_check_github_actions_succeeds_when_policy_matches(
@@ -321,3 +361,106 @@ def test_apply_github_actions_reports_failure(
 
     assert result.exit_code == 1
     assert "ERROR: policy did not converge" in result.output
+
+
+def test_login_reuses_or_establishes_operator_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Login delegates authentication to the operator module."""
+    calls: list[str] = []
+
+    def fake_login() -> None:
+        calls.append("login")
+
+    monkeypatch.setattr("mxm.control.cli.operator.login", fake_login)
+
+    result = runner.invoke(app, ["login"])
+
+    assert result.exit_code == 0
+    assert calls == ["login"]
+    assert "Proton Pass session available" in result.stdout
+
+
+def test_login_reports_authentication_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Login reports an operator authentication failure."""
+
+    def fake_login() -> None:
+        raise operator.OperatorError("Proton Pass login failed")
+
+    monkeypatch.setattr("mxm.control.cli.operator.login", fake_login)
+
+    result = runner.invoke(app, ["login"])
+
+    assert result.exit_code == 1
+    assert "ERROR: Proton Pass login failed" in result.output
+
+
+def test_status_reports_both_authenticated_backends(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CLI status reports successful authentication for both backends."""
+    monkeypatch.setattr(
+        operator,
+        "operator_status",
+        lambda: operator.OperatorStatus(proton_pass=True, github=True),
+    )
+
+    result = runner.invoke(app, ["status"])
+
+    assert result.exit_code == 0
+    assert "OK                Proton Pass" in result.stdout
+    assert "OK                GitHub CLI" in result.stdout
+
+
+def test_status_reports_partial_authentication(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CLI reports individual backends and fails when one is unavailable."""
+    monkeypatch.setattr(
+        operator,
+        "operator_status",
+        lambda: operator.OperatorStatus(proton_pass=True, github=False),
+    )
+
+    result = runner.invoke(app, ["status"])
+
+    assert result.exit_code == 1
+    assert "OK                Proton Pass" in result.output
+    assert "UNAUTHENTICATED" in result.output
+    assert "GitHub CLI" in result.output
+
+
+def test_logout_terminates_operator_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Logout delegates session termination to the operator module."""
+    calls: list[str] = []
+
+    def fake_logout() -> None:
+        calls.append("logout")
+
+    monkeypatch.setattr("mxm.control.cli.operator.logout", fake_logout)
+
+    result = runner.invoke(app, ["logout"])
+
+    assert result.exit_code == 0
+    assert calls == ["logout"]
+    assert "Proton Pass session terminated" in result.stdout
+
+
+def test_logout_reports_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Logout reports failures without claiming session termination."""
+
+    def fake_logout() -> None:
+        raise operator.OperatorError("Proton Pass logout failed")
+
+    monkeypatch.setattr("mxm.control.cli.operator.logout", fake_logout)
+
+    result = runner.invoke(app, ["logout"])
+
+    assert result.exit_code == 1
+    assert "ERROR: Proton Pass logout failed" in result.output
