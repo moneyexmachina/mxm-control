@@ -43,6 +43,7 @@ from mxm.control.tailscale import (
     TailscaleClient,
     TailscaleDevice,
     TailscaleError,
+    TailscaleTransientError,
     devices_with_tag,
 )
 
@@ -962,33 +963,38 @@ def _await_bootstrap_device(
     deadline = time.monotonic() + timeout_seconds
 
     while True:
-        matching = devices_with_tag(
-            tailscale.list_devices(),
-            service_tag,
-        )
-
-        new_devices = [device for device in matching if device.id not in retired_ids]
-
-        if len(new_devices) > 1:
-            raise MachineBootstrapError(
-                "Multiple new Tailscale registrations match the service tag"
+        try:
+            matching = devices_with_tag(
+                tailscale.list_devices(),
+                service_tag,
             )
+        except TailscaleTransientError as exc:
+            print(f"WAIT      {exc}", flush=True)
+        else:
+            new_devices = [
+                device for device in matching if device.id not in retired_ids
+            ]
 
-        if new_devices:
-            device = new_devices[0]
+            if len(new_devices) > 1:
+                raise MachineBootstrapError(
+                    "Multiple new Tailscale registrations match the service tag"
+                )
 
-            if device.connected_to_control is True and _bootstrap_ssh_ready(
-                device.name,
-                environment,
-            ):
-                return device
+            if new_devices:
+                device = new_devices[0]
+
+                if device.connected_to_control is True and _bootstrap_ssh_ready(
+                    device.name,
+                    environment,
+                ):
+                    return device
 
         if time.monotonic() >= deadline:
             raise MachineBootstrapError(
                 "Timed out waiting for new Tailscale enrollment and SSH"
             )
 
-        time.sleep(10.0)
+        time.sleep(20.0)
 
 
 def apply_machine_bootstrap_inherited(

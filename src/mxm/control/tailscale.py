@@ -35,6 +35,10 @@ class TailscaleError(RuntimeError):
     """Raised when a Tailscale management operation fails."""
 
 
+class TailscaleTransientError(TailscaleError):
+    """Raised when a Tailscale API operation fails temporarily."""
+
+
 @dataclass(frozen=True, slots=True)
 class TailscaleDevice:
     """A device registered in a Tailscale tailnet.
@@ -216,13 +220,17 @@ class TailscaleClient:
             )
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
-            raise TailscaleError(
-                f"Tailscale API {method} {path} "
-                f"returned HTTP {exc.response.status_code}"
-            ) from None
-        except httpx.RequestError:
-            raise TailscaleError(
-                f"Tailscale API {method} {path} request failed"
+            status = exc.response.status_code
+            message = f"Tailscale API {method} {path} returned HTTP {status}"
+
+            if status == 429 or 500 <= status < 600:
+                raise TailscaleTransientError(message) from None
+
+            raise TailscaleError(message) from None
+
+        except httpx.RequestError as exc:
+            raise TailscaleTransientError(
+                f"Tailscale API {method} {path} request failed: {type(exc).__name__}"
             ) from None
 
         return response
