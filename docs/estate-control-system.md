@@ -123,10 +123,14 @@ It includes:
 - filesystems;
 - network interfaces;
 - SSH configuration;
-- systemd units;
+- systemd and other host service-management facilities;
 - OpenWrt configuration;
-- service installation;
+- Tailscale installation and node enrollment;
+- container engines and Compose support;
+- host storage preparation and mounts;
 - host-local runtime configuration.
+
+L2 supplies the execution environment for services. The deployed application/service instance and its own configuration and data belong to L3, even when running on a local host.
 
 The default mechanism is **configuration management**, currently expected to be primarily Ansible where appropriate, with bootstrap mechanisms such as cloud-init where useful.
 
@@ -135,9 +139,10 @@ Typical examples:
 ```text
 Ubuntu host configuration
 OpenWrt router configuration
-OpenBao installation
-PostgreSQL installation
-systemd service definitions
+Tailscale node enrollment
+Docker or Podman runtime
+host filesystem mounts
+systemd host facilities
 WireGuard configuration
 ```
 
@@ -149,13 +154,13 @@ L2 answers:
 
 ### 3.3 L3 — Services
 
-L3 concerns the logical administrative state of running services, whether self-hosted or external.
+L3 concerns deployed services and their desired configuration, lifecycle, persistent service data, and logical administrative state, whether self-hosted or external. A hosted service has no MXM-managed L1/L2 merely because MXM manages its L3 resources.
 
 Examples include:
 
-- OpenBao auth methods, mounts, policies, and AppRoles;
+- OpenBao container deployment, listener, Raft data, auth methods, mounts, policies, and AppRoles;
+- PostgreSQL service deployment, databases, roles, grants, and extensions;
 - GitHub repositories, rulesets, organisation settings, and access controls;
-- PostgreSQL databases, roles, grants, and extensions;
 - Tailscale policy and service-level configuration;
 - Prefect control state;
 - other external or self-hosted service APIs.
@@ -164,7 +169,7 @@ L3 answers:
 
 > How is this service constituted and governed?
 
-Where mature providers exist, **OpenTofu is the default reconciliation engine for L3 desired state**.
+Where mature providers exist, **OpenTofu is the default reconciliation engine for L3 desired state**. For container-hosted services, established container tooling (such as Compose) manages deployment; host configuration tools remain responsible for the L2 runtime prerequisites.
 
 Where state changes are intrinsically ordered and historical, **migrations** are used.
 
@@ -207,31 +212,32 @@ The Estate Control System establishes the capabilities on which these systems de
 
 ---
 
-## 4. Appliances are vertical compositions, not layers
+## 4. Stacks and appliances are vertical compositions, not layers
 
-An appliance is not a separate architectural layer.
+A **stack** is a bounded unit of estate ownership and intent, providing a coherent capability. It may span L1–L3, or manage only those layers for which MXM has authority. Stacks are the primary organisational units of `mxm-estate`; layers are secondary divisions within a stack where useful.
 
-An appliance is a composition that crosses L1, L2, and often L3.
-
-For example:
+A self-hosted appliance is a typical vertical stack. For example:
 
 ```text
-mxm-security
-
-L1  Hetzner VM, network, firewall
-L2  Ubuntu, OpenBao process, systemd, proxy/TLS
-L3  OpenBao mounts, auth methods, policies, AppRoles
+stacks/mxm-security/
+    l1/  Hetzner VM, network, firewall, volumes
+    l2/  Ubuntu, Tailscale node, container runtime, host facilities
+    l3/  OpenBao deployment, persistent Raft storage, service policy
 ```
 
-Likewise, a future `gatehouse` appliance may comprise:
+A hosted service can also be a stack. For example, `stacks/github/` manages GitHub organisation and ruleset intent at L3. GitHub's own machines and operating systems are not part of the MXM estate. `stacks/tailscale/` similarly owns tailnet-wide policy and service configuration; a Tailscale node installed on `mxm-security` belongs to that appliance's L2.
 
-```text
-L1  physical or cloud network resources
-L2  OpenWrt and host configuration
-L3  service-level networking policy
-```
+The following distinctions are important:
 
-This distinction prevents appliance-specific implementation structure from replacing the more general estate model.
+- A stack is **not** an OpenTofu root directory. An OpenTofu root is a mechanism-specific unit of reconciliation that may be contained within a stack.
+- A stack need not contain every layer, and empty layer directories are unnecessary.
+- A stack is **not** automatically an atomic deployment, transaction, or unit of `plan/check/apply` execution.
+- Each managed resource must have exactly one authoritative owner, even when stacks depend on one another.
+- Cross-stack dependencies do not transfer resource ownership.
+
+A future `gatehouse` appliance might span a physical network resource (L1), OpenWrt configuration (L2), and service-level networking policy (L3). Appliances are therefore compositions across layers, not architectural layers themselves.
+
+Stack-first layout is an ownership and navigation convention. It does **not** mandate a custom stack orchestrator or universal stack-level reconciliation verbs. Those would require separate justification based on demonstrated repeated needs.
 
 ---
 
@@ -245,15 +251,13 @@ It contains reusable machinery for controlling an estate:
 
 ```text
 mxm-control/
-    infra/
-    systems/
-    services/
-    migrations/
-    operations/
-    cli/
-    docs/
-    tests/
+    src/mxm/control/    # operator CLI and reusable capabilities
+    tests/              # mechanism and contract tests
+    docs/               # public usage and design
+    ...                 # reusable modules, roles, and adapters as needed
 ```
+
+The organisation of `mxm-control` is **capability-first**, not stack-first or necessarily layer-first. A mechanism such as OpenTofu can serve both L1 machine declarations and L3 externally hosted service declarations.
 
 Its contents may include:
 
@@ -295,17 +299,21 @@ Illustratively:
 
 ```text
 mxm-estate/
-    infra/
-    systems/
-    services/
-        openbao/
-        github/
-        postgres/
-        tailscale/
-        prefect/
-    migrations/
+    authority/
+        environment.toml
+    stacks/
+        github/              # externally hosted L3
+        tailscale/           # externally hosted L3
+        mxm-security/
+            l1/             # OpenTofu root: machine resources
+            l2/             # host-system configuration
+            l3/             # OpenBao service deployment and intent
+        ...
+    migrations/              # estate-wide transitions where required
     docs/
 ```
+
+Stack-local ordered transitions and operator materials may live alongside the stack they affect. The illustrative layout is not a requirement to introduce manifests or a general stack execution engine. Existing `github` and `tailscale` OpenTofu roots remain valid without artificial layer directories.
 
 `mxm-estate` is private, but its contents are not assumed to be secrets.
 
@@ -505,6 +513,35 @@ Default tool choices are:
 Its purpose is to make these mechanisms coherent within one estate-control model and expose a consistent operator surface.
 
 The Kubernetes controller model is useful conceptually — observed state is driven toward desired state — but MXM should not introduce Kubernetes merely to obtain that abstraction.
+
+### 8.1 Human operator control surface
+
+**`mxm-control` is the single privileged, human-operated administrative entry point for the estate. It is not an agent runtime, and autonomous agents must never be given direct or indirect authority to invoke it.** This boundary is enforced through credential custody, operating-system identities, and permissions, not merely by usage conventions. See [authority-model.md](authority-model.md) for the complementary authority hierarchy.
+
+The CLI is **capability-oriented**: it preserves the genuine semantics of the underlying technology while supplying common operator authentication, declared credential bindings, environment-inheritance policy, safety checks, and explicit operation boundaries.
+
+For example:
+
+```text
+mxm-control plan opentofu --root ...
+mxm-control check opentofu --root ...
+mxm-control apply opentofu --root ...
+mxm-control openbao snapshot ...
+mxm-control openbao restore ...
+mxm-control authorize ...
+```
+
+The OpenTofu `--root` spelling and the OpenBao/authorization commands above are **target interfaces**, not a claim that every command is currently implemented. The existing OpenTofu `--stack` argument denotes an OpenTofu root and should be renamed or aliased to `--root` as a separate CLI compatibility change.
+
+Technology-level reconciliation commands are suitable for OpenTofu, Ansible, and Compose when appropriate. Service-specific administration (snapshot, restore, unseal, authorization lease) deserves typed, bounded operator commands rather than an unrestricted script executor. Concrete targets and policy belong in `mxm-estate`; reusable execution and safety mechanisms belong in `mxm-control`.
+
+There is **no initial promise of universal `mxm-control stack plan/check/apply` verbs**. `stacks/` establishes the estate's units of intent and ownership, not an invented common reconciliation semantics across heterogeneous tools. Stack-wide orchestration may be considered later only when repeated practical requirements justify it.
+
+### 8.2 Bootstrap authority and environment inheritance
+
+Human operator access uses the authority model described in [authority-model.md](authority-model.md). `mxm-estate/authority/environment.toml` declares which inherited environment variables may not implicitly affect control operations; stack-local credential bindings declare explicitly required Proton Pass references. `mxm-control` validates and enforces those declarations without embedding MXM-specific provider policy in its public mechanism code.
+
+Missing or invalid required environment policy must fail before execution. This controls declared environment inheritance; it is not a general process sandbox or a substitute for provider-specific authorization checks.
 
 ---
 
@@ -716,7 +753,7 @@ The following invariants define the architecture.
 3. **Secrets are never stored in either Git repository.**
 4. **Generated controller state is not committed to source control.**
 5. **L1, L2, and L3 belong to the Estate Control System; L4 domain behaviour does not.**
-6. **Appliances are compositions across layers, not architectural layers themselves.**
+6. **Stacks are bounded units of intent and ownership; appliances are vertical compositions across layers, not architectural layers themselves.**
 7. **Reconciliation, migration, and operation remain distinct semantics.**
 8. **OpenTofu is preferred for stable declarative reconciliation where a mature provider exists.**
 9. **Existing deterministic tools are preferred over custom agentic or orchestration machinery.**
@@ -725,64 +762,52 @@ The following invariants define the architecture.
 12. **Domain systems exercise granted capabilities; they do not grant themselves authority.**
 13. **A domain package may declare requirements; only the estate may bind those requirements to actual authority.**
 14. **The control system must remain reconstructable, inspectable, testable, and auditable.**
+15. **`mxm-estate` is organised stack-first, with L1–L3 subdivisions only where useful; one managed resource has one authoritative owner.**
+16. **A stack is not an OpenTofu root and does not imply a universal or atomic stack-level reconciliation operation.**
+17. **`mxm-control` is exclusively a privileged human-operated administrative interface, inaccessible to autonomous agents.**
+18. **`mxm-control` is capability-oriented and delegates to mature native tools instead of duplicating their orchestration engines.**
+19. **Declared operator-environment policy is enforced before credentials are injected or managed operations execute.**
 
 ---
 
 ## 15. First implementation slice
 
-The first vertical implementation should be `mxm-security`, because it exercises the full architecture.
+The first complete self-hosted vertical implementation is `mxm-security`. This stack tests L1–L3 separately without rebuilding the former all-in-one cloud-init installer:
 
 ```text
-mxm-estate
-    declares mxm-security
+mxm-estate/stacks/mxm-security/
+    l1/  declare new generation Hetzner resources
+    l2/  declare Ubuntu, Tailscale node, container-host configuration
+    l3/  declare OpenBao container, plugin, persistence and policy
 
-        ↓
+mxm-control
+    reconcile L1 via OpenTofu
+    configure L2 through established host-management tooling
+    deploy and operate L3 through established service mechanisms
 
-mxm-control / infra
-    provisions Hetzner resources
-
-        ↓
-
-mxm-control / systems
-    configures the host
-
-        ↓
-
-mxm-control / services / openbao
-    establishes and evolves OpenBao logical state
-
-        ↓
-
-OpenBao
-    becomes the realised operational security authority
-
-        ↓
-
-mxm-secrets
-    exercises granted authority for domain applications
+realised OpenBao
+    provides operational authority consumed by mxm-secrets and other workloads
 ```
 
-This slice should be completed before introducing broad generic abstractions.
+Stages have independent execution and verification boundaries. Cloud-init is minimal bootstrap, not the installation or migration of OpenBao. The old OpenBao authority remains intact until a separately approved Raft restore, Shamir unseal, verification and service cutover. Ordinary reconciliation must not implicitly initialise or restore OpenBao or remove the sole persistent state copy.
 
-Interfaces should be derived from real repeated needs rather than designed speculatively.
+The existing `stacks/github` and `stacks/tailscale` are already functioning externally hosted L3 stacks and provide working examples of OpenTofu reconciliation under declared human-operator authority. The operator login, credential bindings and environment-policy enforcement have been implemented and checked against both stacks with no observed drift.
+
+This slice should be completed before introducing broad generic abstractions. Interfaces should be derived from real repeated needs rather than designed speculatively.
 
 ---
 
 ## 16. Implementation sequence
 
-The refounding should proceed in this order:
+The refounding proceeds incrementally, preserving the distinction between implemented capabilities and planned work.
 
-1. Create `mxm-control` as the public control-mechanism repository.
-2. Create `mxm-estate` as the private estate-intent repository.
-3. Establish the L1/L2/L3 directory and documentation structure.
-4. Classify all existing `mxm-infra` material into mechanism, intent, operational state, secret, or domain material.
-5. Move generic mechanisms into `mxm-control`.
-6. Move concrete estate intent and history into `mxm-estate`.
-7. Remove secrets and generated state from Git-backed material.
-8. Refound `mxm-security` as the first complete vertical slice.
-9. Migrate infrastructure/control fragments currently embedded in `mxm-moneymachine` and other domain repositories.
-10. Add GitHub, Tailscale, PostgreSQL, Prefect, gatehouse/OpenWrt, and later `mxm-memory` using the same model.
-11. Generalise only after repeated patterns are demonstrated.
+1. **Established:** Create `mxm-control` (public) and `mxm-estate` (private) and establish the authority boundary.
+2. **Established:** Reconcile the GitHub and Tailscale hosted-service stacks using OpenTofu and the human operator authentication, credential binding, and environment-policy mechanisms.
+3. **Current:** Organise `mxm-estate` by stacks, with layer-local declarations for composite appliances. Preserve existing simple OpenTofu roots without unnecessary restructuring.
+4. **Next:** Rebuild `mxm-security` in independently verified L1 (Hetzner), L2 (host and container runtime), and L3 (OpenBao) stages. Adopt generic mechanisms only to the extent demonstrated by this working vertical slice.
+5. **Controlled transition:** Perform snapshot verification, Raft restoration, original Shamir unseal, service verification and authority cutover as separately authorised procedures, keeping the legacy service available until safe cutover.
+6. **Continue migration:** Classify and move the remaining `mxm-infra` and domain-repository infrastructure fragments by mechanism, intent, operational state, secret, and domain ownership. Retire legacy repositories only after verifying their functions and recovery requirements are replaced.
+7. **Expand:** Deploy subsequent service stacks (PostgreSQL, Prefect, S3 and others) using proven host and service mechanisms. Generalise cross-stack orchestration only if repeatable practical needs warrant it.
 
 ---
 
