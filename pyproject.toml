@@ -27,6 +27,7 @@ gitpython = "^3.1.43"
 pathspec = "^0.12.1"
 mxm-config = "^0.3.0"
 tomli-w = "^1.2.0"
+httpx = "^0.28.1"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.4.2"
