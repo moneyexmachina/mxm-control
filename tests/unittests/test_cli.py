@@ -13,6 +13,7 @@ import pytest
 from typer.testing import CliRunner
 
 from mxm.control import cli, operator
+from mxm.control.ansible import AnsibleDeployment, AnsibleError
 from mxm.control.cli import app
 from mxm.control.github.actions_policy import (
     ActionsPolicyError,
@@ -51,12 +52,29 @@ def test_plan_help_exposes_opentofu_and_machine_bootstrap() -> None:
     assert "machine-bootstrap" in result.stdout
 
 
-def test_preflight_help_exposes_machine_bootstrap() -> None:
-    """Expose the read-only machine-bootstrap preflight command."""
+def test_preflight_help_exposes_commands() -> None:
+    """Expose machine-bootstrap and Ansible SSH preflight capabilities."""
     result = runner.invoke(app, ["preflight", "--help"])
 
     assert result.exit_code == 0
     assert "machine-bootstrap" in result.stdout
+    assert "ansible-ssh" in result.stdout
+
+
+def test_check_help_exposes_ansible() -> None:
+    """Expose the Ansible configuration preview command."""
+    result = runner.invoke(app, ["check", "--help"])
+
+    assert result.exit_code == 0
+    assert "ansible" in result.stdout
+
+
+def test_apply_help_exposes_ansible() -> None:
+    """Expose the Ansible configuration application command."""
+    result = runner.invoke(app, ["apply", "--help"])
+
+    assert result.exit_code == 0
+    assert "ansible" in result.stdout
 
 
 # ---------------------------------------------------------------------------
@@ -211,6 +229,119 @@ def test_plan_machine_bootstrap_reports_failure(
 # ---------------------------------------------------------------------------
 # Preflight
 # ---------------------------------------------------------------------------
+def test_preflight_ansible_ssh_forwards_arguments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Forward the selected Tailscale host and user to the SSH preflight."""
+    observed: dict[str, str] = {}
+
+    def fake_preflight(
+        *,
+        host: str,
+        user: str,
+    ) -> None:
+        """Record preflight arguments without contacting Tailscale."""
+        observed["host"] = host
+        observed["user"] = user
+
+    monkeypatch.setattr(
+        cli,
+        "check_ansible_ssh",
+        fake_preflight,
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "preflight",
+            "ansible-ssh",
+            "--host",
+            "mxm-security",
+            "--user",
+            "operator",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert observed == {
+        "host": "mxm-security",
+        "user": "operator",
+    }
+    assert "OK" in result.output
+    assert "Ansible Tailscale SSH: operator@mxm-security" in result.output
+
+
+def test_preflight_ansible_ssh_defaults_to_mxm_user(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Use the default MXM operator account when no user is specified."""
+    observed: dict[str, str] = {}
+
+    def fake_preflight(
+        *,
+        host: str,
+        user: str,
+    ) -> None:
+        """Record the effective Tailscale SSH identity."""
+        observed["host"] = host
+        observed["user"] = user
+
+    monkeypatch.setattr(
+        cli,
+        "check_ansible_ssh",
+        fake_preflight,
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "preflight",
+            "ansible-ssh",
+            "--host",
+            "mxm-security",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert observed == {
+        "host": "mxm-security",
+        "user": "mxm",
+    }
+    assert "Ansible Tailscale SSH: mxm@mxm-security" in result.output
+
+
+def test_preflight_ansible_ssh_reports_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Report Tailscale SSH failures without claiming successful access."""
+
+    def fake_preflight(
+        *,
+        host: str,
+        user: str,
+    ) -> None:
+        """Simulate an unsuccessful Tailscale SSH preflight."""
+        raise cli.TailscaleAnsibleError("No verified SSH host key found")
+
+    monkeypatch.setattr(
+        cli,
+        "check_ansible_ssh",
+        fake_preflight,
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "preflight",
+            "ansible-ssh",
+            "--host",
+            "mxm-security",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "ERROR: No verified SSH host key found" in result.output
+    assert "OK" not in result.output
 
 
 def test_preflight_machine_bootstrap_forwards_arguments(
@@ -556,9 +687,138 @@ def test_apply_github_actions_reports_failure(
     assert "ERROR: policy did not converge" in result.output
 
 
+def test_apply_ansible_forwards_deployment_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Forward the estate root and report successful Ansible application."""
+    root = tmp_path / "l2"
+    root.mkdir()
+    observed: list[Path] = []
+
+    def fake_apply_ansible(*, root: Path) -> AnsibleDeployment:
+        """Record the deployment root without executing Ansible."""
+        observed.append(root)
+        return AnsibleDeployment(
+            root=root.resolve(),
+            inventory=root / "inventory.yml",
+            playbook=root / "playbook.yml",
+        )
+
+    monkeypatch.setattr(cli, "apply_ansible", fake_apply_ansible)
+
+    result = runner.invoke(
+        app,
+        [
+            "apply",
+            "ansible",
+            "--root",
+            str(root),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert observed == [root]
+    assert f"OK        Ansible applied: {root.resolve()}" in result.output
+
+
+def test_apply_ansible_reports_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Report failed Ansible application without claiming success."""
+    root = tmp_path / "l2"
+    root.mkdir()
+
+    def fake_apply_ansible(*, root: Path) -> AnsibleDeployment:
+        """Simulate an unsuccessful Ansible reconciliation."""
+        raise AnsibleError("Ansible apply failed with exit status 2")
+
+    monkeypatch.setattr(cli, "apply_ansible", fake_apply_ansible)
+
+    result = runner.invoke(
+        app,
+        [
+            "apply",
+            "ansible",
+            "--root",
+            str(root),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "ERROR: Ansible apply failed with exit status 2" in result.output
+    assert "Ansible applied" not in result.output
+
+
 # ---------------------------------------------------------------------------
 # Check
 # ---------------------------------------------------------------------------
+
+
+def test_check_ansible_forwards_deployment_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Forward the estate root and report a completed Ansible preview."""
+    root = tmp_path / "l2"
+    root.mkdir()
+    observed: list[Path] = []
+
+    def fake_plan_ansible(*, root: Path) -> AnsibleDeployment:
+        """Record the deployment root without executing Ansible."""
+        observed.append(root)
+        return AnsibleDeployment(
+            root=root.resolve(),
+            inventory=root / "inventory.yml",
+            playbook=root / "playbook.yml",
+        )
+
+    monkeypatch.setattr(cli, "plan_ansible", fake_plan_ansible)
+
+    result = runner.invoke(
+        app,
+        [
+            "check",
+            "ansible",
+            "--root",
+            str(root),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert observed == [root]
+    assert f"PREVIEW   Ansible check completed: {root.resolve()}" in result.output
+
+
+def test_check_ansible_reports_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Report a failed Ansible preview without claiming completion."""
+    root = tmp_path / "l2"
+    root.mkdir()
+
+    def fake_plan_ansible(*, root: Path) -> AnsibleDeployment:
+        """Simulate an unsuccessful Ansible check-mode execution."""
+        raise AnsibleError("Ansible preview failed with exit status 4")
+
+    monkeypatch.setattr(cli, "plan_ansible", fake_plan_ansible)
+
+    result = runner.invoke(
+        app,
+        [
+            "check",
+            "ansible",
+            "--root",
+            str(root),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "ERROR: Ansible preview failed with exit status 4" in result.output
+    assert "PREVIEW" not in result.output
+    assert "Ansible check completed" not in result.output
 
 
 def test_check_opentofu_reports_drift_with_distinct_exit_status(

@@ -14,6 +14,11 @@ from typing import Annotated
 import typer
 
 from mxm.control import operator
+from mxm.control.ansible import (
+    AnsibleError,
+    apply_ansible,
+    plan_ansible,
+)
 from mxm.control.github.actions_policy import (
     ActionsPolicyError,
     PlanAction,
@@ -33,6 +38,10 @@ from mxm.control.opentofu import (
     apply_opentofu,
     check_opentofu,
     plan_opentofu,
+)
+from mxm.control.tailscale_ansible import (
+    TailscaleAnsibleError,
+    check_ansible_ssh,
 )
 
 app = typer.Typer(
@@ -185,6 +194,40 @@ def plan_github_actions(
 # ---------------------------------------------------------------------------
 # Preflight
 # ---------------------------------------------------------------------------
+@preflight_app.command("ansible-ssh")
+def preflight_ansible_ssh_command(
+    host: Annotated[
+        str,
+        typer.Option(
+            "--host",
+            help="Short or fully qualified Tailscale machine hostname.",
+        ),
+    ],
+    user: Annotated[
+        str,
+        typer.Option(
+            "--user",
+            help="Remote Unix account used for Tailscale SSH.",
+        ),
+    ] = "mxm",
+) -> None:
+    """Verify Ansible connectivity through authenticated Tailscale SSH.
+
+    Resolve the target's canonical Tailscale identity, verify SSH access
+    and host keys, then execute a read-only Ansible ping.
+
+    This command does not modify remote machine configuration.
+    """
+    try:
+        check_ansible_ssh(
+            host=host,
+            user=user,
+        )
+    except TailscaleAnsibleError as exc:
+        typer.echo(f"ERROR: {exc}", err=True)
+        raise typer.Exit(1) from exc
+
+    typer.echo(f"OK        Ansible Tailscale SSH: {user}@{host}")
 
 
 @preflight_app.command("machine-bootstrap")
@@ -242,6 +285,36 @@ def preflight_machine_bootstrap_command(
 # ---------------------------------------------------------------------------
 # Apply
 # ---------------------------------------------------------------------------
+
+
+@apply_app.command("ansible")
+def apply_ansible_command(
+    root: Annotated[
+        Path,
+        typer.Option(
+            "--root",
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            readable=True,
+            help="Estate Ansible deployment root.",
+        ),
+    ],
+) -> None:
+    """Reconcile a machine using its estate-defined Ansible playbook.
+
+    Resolve the target and remote user from the estate inventory,
+    establish verified Tailscale SSH access, and execute the playbook.
+
+    Ansible evaluates the current machine state during application.
+    """
+    try:
+        deployment = apply_ansible(root=root)
+    except AnsibleError as exc:
+        typer.echo(f"ERROR: {exc}", err=True)
+        raise typer.Exit(1) from exc
+
+    typer.echo(f"OK        Ansible applied: {deployment.root}")
 
 
 @apply_app.command("opentofu")
@@ -384,6 +457,37 @@ def apply_github_actions(
 # ---------------------------------------------------------------------------
 # Check
 # ---------------------------------------------------------------------------
+
+
+@check_app.command("ansible")
+def check_ansible_command(
+    root: Annotated[
+        Path,
+        typer.Option(
+            "--root",
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            readable=True,
+            help="Estate Ansible deployment root.",
+        ),
+    ],
+) -> None:
+    """Preview estate configuration using Ansible check and diff modes.
+
+    Resolve the target from the estate inventory and execute the
+    playbook with --check --diff.
+
+    The output is predictive, not a saved executable plan.
+    A successful check does not imply the absence of changes.
+    """
+    try:
+        deployment = plan_ansible(root=root)
+    except AnsibleError as exc:
+        typer.echo(f"ERROR: {exc}", err=True)
+        raise typer.Exit(1) from exc
+
+    typer.echo(f"PREVIEW   Ansible check completed: {deployment.root}")
 
 
 @check_app.command("opentofu")
