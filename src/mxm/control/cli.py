@@ -20,6 +20,7 @@ from mxm.control.ansible import (
     apply_ansible,
     plan_ansible,
 )
+from mxm.control.authorize import AuthorizationError, authorize_machine
 from mxm.control.credentials import CredentialError, run_with_credentials
 from mxm.control.github.actions_policy import (
     ActionsPolicyError,
@@ -849,3 +850,25 @@ def openbao_restore_command(
     typer.echo("State       Initialized and sealed")
     typer.echo("")
     typer.echo("Next: unseal OpenBao using the original physical Shamir shares.")
+
+
+@app.command("authorize")
+def authorize_command(name: str) -> None:
+    """Activate an estate-declared machine's OpenBao runtime identity.
+
+    Requires an existing authenticated OpenBao operator session.
+    Delivers fresh response-wrapped AppRole bootstrap credentials
+    to the machine and verifies successful proxy authentication.
+
+    Does not provision the machine or modify OpenBao policies.
+    """
+    try:
+        authorize_machine(
+            estate_root=_estate_root(),
+            name=name,
+        )
+    except AuthorizationError as exc:
+        typer.echo(f"ERROR: {exc}", err=True)
+        raise typer.Exit(1) from exc
+
+    typer.echo(f"OK        {name} authorized")

@@ -15,6 +15,7 @@ from typer.testing import CliRunner
 
 from mxm.control import cli, operator
 from mxm.control.ansible import AnsibleDeployment, AnsibleError
+from mxm.control.authorize import AuthorizationError
 from mxm.control.cli import app
 from mxm.control.credentials import CredentialError
 from mxm.control.github.actions_policy import (
@@ -54,6 +55,7 @@ def test_help_exposes_control_operations() -> None:
     assert "preflight" in result.stdout
     assert "apply" in result.stdout
     assert "check" in result.stdout
+    assert "authorize" in result.stdout
 
 
 def test_plan_help_exposes_opentofu_and_machine_bootstrap() -> None:
@@ -2161,3 +2163,112 @@ def test_openbao_restore_reports_missing_estate_checkout(
 
     assert result.exit_code == 1
     assert "ERROR: Estate root not found" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Machine authorization
+# ---------------------------------------------------------------------------
+
+
+def test_authorize_command_help() -> None:
+    """Expose machine authorization as a top-level operator command."""
+    result = runner.invoke(app, ["authorize", "--help"])
+
+    assert result.exit_code == 0, result.output
+    assert "authorize [OPTIONS]" in result.output
+    assert "--root" not in result.output
+
+
+def test_authorize_command_delegates_to_capability(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Resolve the estate and delegate authorization exactly once."""
+    estate_root = tmp_path / "mxm-estate"
+    estate_root.mkdir()
+
+    _mock_estate_root(monkeypatch, estate_root)
+
+    calls: list[tuple[Path, str]] = []
+
+    def fake_authorize(
+        *,
+        estate_root: Path,
+        name: str,
+    ) -> None:
+        calls.append((estate_root, name))
+
+    monkeypatch.setattr(
+        cli,
+        "authorize_machine",
+        fake_authorize,
+    )
+
+    result = runner.invoke(
+        app,
+        ["authorize", "mxm-factory-agent"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls == [(estate_root, "mxm-factory-agent")]
+    assert "OK        mxm-factory-agent authorized" in result.output
+
+
+def test_authorize_command_reports_capability_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Report authorization failure without claiming success."""
+    estate_root = tmp_path / "mxm-estate"
+    estate_root.mkdir()
+
+    _mock_estate_root(monkeypatch, estate_root)
+
+    calls: list[str] = []
+
+    def failing_authorize(
+        *,
+        estate_root: Path,
+        name: str,
+    ) -> None:
+        calls.append(name)
+        raise AuthorizationError("Factory proxy authentication failed")
+
+    monkeypatch.setattr(
+        cli,
+        "authorize_machine",
+        failing_authorize,
+    )
+
+    result = runner.invoke(
+        app,
+        ["authorize", "mxm-factory-agent"],
+    )
+
+    assert result.exit_code == 1
+    assert calls == ["mxm-factory-agent"]
+    assert "ERROR: Factory proxy authentication failed" in result.output
+    assert "authorized" not in result.output
+
+
+def test_authorize_command_requires_machine_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reject missing target names without invoking authorization."""
+
+    def forbidden_authorize(
+        *,
+        estate_root: Path,
+        name: str,
+    ) -> None:
+        pytest.fail("Authorization must not execute without a target")
+
+    monkeypatch.setattr(
+        cli,
+        "authorize_machine",
+        forbidden_authorize,
+    )
+
+    result = runner.invoke(app, ["authorize"])
+
+    assert result.exit_code == 2
