@@ -8,6 +8,7 @@ coordinates provisioning and Tailscale enrollment for named singleton
 machines, without managing application or service restoration.
 """
 
+import sys
 from pathlib import Path
 from typing import Annotated
 
@@ -19,6 +20,7 @@ from mxm.control.ansible import (
     apply_ansible,
     plan_ansible,
 )
+from mxm.control.credentials import CredentialError, run_with_credentials
 from mxm.control.github.actions_policy import (
     ActionsPolicyError,
     PlanAction,
@@ -644,6 +646,47 @@ def logout_command() -> None:
 # ---------------------------------------------------------------------------
 # OpenBao operator operations
 # ---------------------------------------------------------------------------
+
+
+@openbao_app.command("login")
+def openbao_login_command() -> None:
+    """Establish a temporary OpenBao security-admin operator session.
+
+    Resolve the service and its credential manifest from the estate.
+    Execute authentication in a Proton Pass credential-bound child
+    process, without materializing credentials in the parent CLI.
+
+    The child stores the resulting token using the native bao CLI.
+    """
+    estate_root = _estate_root()
+
+    try:
+        registered = resolve_service(
+            estate_root=estate_root,
+            name="openbao",
+        )
+
+        if registered.credentials is None:
+            raise ServiceError("OpenBao has no registered operator credentials")
+
+        result = run_with_credentials(
+            [
+                sys.executable,
+                "-m",
+                "mxm.control.openbao.login",
+                registered.target.address,
+            ],
+            stack=registered.credentials,
+            environment_policy=estate_root / "authority" / "environment.toml",
+            restrictive_umask=True,
+        )
+
+    except (ServiceError, CredentialError) as exc:
+        typer.echo(f"ERROR: {exc}", err=True)
+        raise typer.Exit(1) from exc
+
+    if result != 0:
+        raise typer.Exit(1)
 
 
 @openbao_app.command("status")

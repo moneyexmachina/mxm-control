@@ -7,7 +7,7 @@ and operator authentication.
 External operations are replaced with controlled test implementations.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import pytest
@@ -16,6 +16,7 @@ from typer.testing import CliRunner
 from mxm.control import cli, operator
 from mxm.control.ansible import AnsibleDeployment, AnsibleError
 from mxm.control.cli import app
+from mxm.control.credentials import CredentialError
 from mxm.control.github.actions_policy import (
     ActionsPolicyError,
     ActionsPolicyPlan,
@@ -1224,6 +1225,244 @@ def _openbao_status(
 def _openbao_command(command: str) -> list[str]:
     """Build an estate-backed OpenBao CLI invocation."""
     return ["openbao", command]
+
+
+# ---------------------------------------------------------------------------
+# OpenBao operator login
+# ---------------------------------------------------------------------------
+
+
+def _mock_openbao_login_registration(
+    monkeypatch: pytest.MonkeyPatch,
+    estate_root: Path,
+    *,
+    credentials: Path | None,
+) -> list[tuple[Path, str]]:
+    """Resolve OpenBao with its estate-declared credential directory."""
+    calls: list[tuple[Path, str]] = []
+    _mock_estate_root(monkeypatch, estate_root)
+
+    def fake_resolve(
+        *,
+        estate_root: Path,
+        name: str,
+    ) -> RegisteredService:
+        calls.append((estate_root, name))
+        return RegisteredService(
+            target=_openbao_target(),
+            credentials=credentials,
+        )
+
+    monkeypatch.setattr(cli, "resolve_service", fake_resolve)
+    return calls
+
+
+def test_openbao_login_help_requires_no_explicit_inputs() -> None:
+    """Expose rootless login without password or endpoint arguments."""
+    result = runner.invoke(app, ["openbao", "login", "--help"])
+
+    assert result.exit_code == 0, result.output
+    assert "--root" not in result.output
+    assert "--address" not in result.output
+    assert "--username" not in result.output
+    assert "--password" not in result.output
+
+
+def test_openbao_login_delegates_to_credential_bound_child(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Resolve the service and launch login with Proton Pass credentials."""
+    estate_root = tmp_path / "mxm-estate"
+    estate_root.mkdir()
+
+    credentials = estate_root / "stacks" / "mxm-security" / "l3"
+    credentials.mkdir(parents=True)
+
+    resolution_calls = _mock_openbao_login_registration(
+        monkeypatch,
+        estate_root,
+        credentials=credentials,
+    )
+
+    executions: list[list[str]] = []
+
+    def fake_run_with_credentials(
+        command: Sequence[str],
+        *,
+        stack: Path,
+        environment_policy: Path,
+        restrictive_umask: bool = False,
+    ) -> int:
+        executions.append(list(command))
+
+        assert stack == credentials
+        assert environment_policy == (estate_root / "authority" / "environment.toml")
+        assert restrictive_umask is True
+
+        return 0
+
+    monkeypatch.setattr(
+        cli,
+        "run_with_credentials",
+        fake_run_with_credentials,
+    )
+
+    result = runner.invoke(app, ["openbao", "login"])
+
+    assert result.exit_code == 0, result.output
+    assert resolution_calls == [(estate_root, "openbao")]
+
+    assert executions == [
+        [
+            cli.sys.executable,
+            "-m",
+            "mxm.control.openbao.login",
+            OPENBAO_ADDRESS,
+        ],
+    ]
+
+    # The child reports authentication success, not the parent.
+    assert result.output == ""
+
+
+def test_openbao_login_requires_registered_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Refuse login when the estate has no credential declaration."""
+    estate_root = tmp_path / "mxm-estate"
+    estate_root.mkdir()
+
+    _mock_openbao_login_registration(
+        monkeypatch,
+        estate_root,
+        credentials=None,
+    )
+
+    def forbidden_runner(
+        command: Sequence[str],
+        *,
+        stack: Path,
+        environment_policy: Path,
+        restrictive_umask: bool = False,
+    ) -> int:
+        pytest.fail("Login must not execute without registered credentials")
+
+    monkeypatch.setattr(
+        cli,
+        "run_with_credentials",
+        forbidden_runner,
+    )
+
+    result = runner.invoke(app, ["openbao", "login"])
+
+    assert result.exit_code == 1
+    assert "OpenBao has no registered operator credentials" in result.output
+    assert "OK" not in result.output
+
+
+def test_openbao_login_reports_service_resolution_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Do not request credentials when service resolution fails."""
+    _mock_estate_root(monkeypatch, tmp_path / "missing-estate")
+
+    def failing_resolve(
+        *,
+        estate_root: Path,
+        name: str,
+    ) -> RegisteredService:
+        raise ServiceError("Estate root not found")
+
+    monkeypatch.setattr(cli, "resolve_service", failing_resolve)
+
+    result = runner.invoke(app, ["openbao", "login"])
+
+    assert result.exit_code == 1
+    assert "ERROR: Estate root not found" in result.output
+
+
+def test_openbao_login_reports_credential_runner_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Surface Proton Pass execution failures without claiming success."""
+    estate_root = tmp_path / "mxm-estate"
+    estate_root.mkdir()
+
+    credentials = estate_root / "credentials"
+    credentials.mkdir()
+
+    _mock_openbao_login_registration(
+        monkeypatch,
+        estate_root,
+        credentials=credentials,
+    )
+
+    def failing_runner(
+        command: Sequence[str],
+        *,
+        stack: Path,
+        environment_policy: Path,
+        restrictive_umask: bool = False,
+    ) -> int:
+        raise CredentialError("Proton Pass execution unavailable")
+
+    monkeypatch.setattr(
+        cli,
+        "run_with_credentials",
+        failing_runner,
+    )
+
+    result = runner.invoke(app, ["openbao", "login"])
+
+    assert result.exit_code == 1
+    assert "ERROR: Proton Pass execution unavailable" in result.output
+    assert "OK" not in result.output
+
+
+def test_openbao_login_propagates_child_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Return failure when the credential-bound login child fails."""
+    estate_root = tmp_path / "mxm-estate"
+    estate_root.mkdir()
+
+    credentials = estate_root / "credentials"
+    credentials.mkdir()
+
+    _mock_openbao_login_registration(
+        monkeypatch,
+        estate_root,
+        credentials=credentials,
+    )
+
+    calls: list[str] = []
+
+    def failing_child(
+        command: Sequence[str],
+        *,
+        stack: Path,
+        environment_policy: Path,
+        restrictive_umask: bool = False,
+    ) -> int:
+        calls.append("login")
+        return 1
+
+    monkeypatch.setattr(
+        cli,
+        "run_with_credentials",
+        failing_child,
+    )
+
+    result = runner.invoke(app, ["openbao", "login"])
+
+    assert result.exit_code == 1
+    assert calls == ["login"]
+    assert "OK" not in result.output
 
 
 # ---------------------------------------------------------------------------
