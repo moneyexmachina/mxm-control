@@ -32,6 +32,14 @@ from mxm.control.machine_bootstrap import (
     plan_machine_bootstrap,
     preflight_machine_bootstrap_credentials,
 )
+from mxm.control.openbao.api import OpenBaoError
+from mxm.control.openbao.restore import (
+    OpenBaoRecoveryInterruptedError,
+    OpenBaoRestorePlan,
+    restore_openbao,
+)
+from mxm.control.openbao.status import status_openbao
+from mxm.control.openbao.unseal import unseal_openbao
 from mxm.control.opentofu import (
     OpenTofuCheckResult,
     OpenTofuError,
@@ -39,6 +47,13 @@ from mxm.control.opentofu import (
     check_opentofu,
     plan_opentofu,
 )
+from mxm.control.secret_entry import (
+    SecretEntryCancelled,
+    SecretEntryError,
+    prompt_secret,
+)
+from mxm.control.service import ServiceError, resolve_service
+from mxm.control.snapshot import SnapshotError
 from mxm.control.tailscale_ansible import (
     TailscaleAnsibleError,
     check_ansible_ssh,
@@ -60,11 +75,19 @@ apply_app = typer.Typer(
 check_app = typer.Typer(
     help="Check realised state against declared intent.",
 )
-
+openbao_app = typer.Typer(
+    help="Operate estate-managed OpenBao authorities.",
+)
 app.add_typer(plan_app, name="plan")
 app.add_typer(preflight_app, name="preflight")
 app.add_typer(apply_app, name="apply")
 app.add_typer(check_app, name="check")
+app.add_typer(openbao_app, name="openbao")
+
+
+def _estate_root() -> Path:
+    """Locate the operator workstation's mxm-estate checkout."""
+    return Path.home() / "mxm-estate"
 
 
 # ---------------------------------------------------------------------------
@@ -616,3 +639,170 @@ def logout_command() -> None:
         raise typer.Exit(1) from exc
 
     typer.echo("OK        Proton Pass session terminated")
+
+
+# ---------------------------------------------------------------------------
+# OpenBao operator operations
+# ---------------------------------------------------------------------------
+
+
+@openbao_app.command("status")
+def openbao_status_command() -> None:
+    """Inspect the estate-managed OpenBao authority."""
+    try:
+        target = resolve_service(
+            estate_root=_estate_root(),
+            name="openbao",
+        ).target
+
+        status = status_openbao(target.address)
+    except (ServiceError, OpenBaoError) as exc:
+        typer.echo(f"ERROR: {exc}", err=True)
+        raise typer.Exit(1) from exc
+
+    typer.echo(f"Service      {target.name}")
+    typer.echo(f"Address      {target.address}")
+    typer.echo(f"Machine      {target.machine}")
+    typer.echo(f"Version      {status.version}")
+    typer.echo(f"Initialized  {status.initialized}")
+    typer.echo(f"Sealed       {status.sealed}")
+    typer.echo(f"Seal type    {status.seal_type}")
+
+    if status.initialized:
+        typer.echo(f"Shares       {status.shares}")
+        typer.echo(f"Threshold    {status.threshold}")
+
+        if status.sealed:
+            typer.echo(f"Progress     {status.progress}/{status.threshold}")
+
+
+@openbao_app.command("unseal")
+def openbao_unseal_command() -> None:
+    """Unseal the estate-managed OpenBao authority interactively.
+
+    Collect physical Shamir shares from the controlling terminal.
+    Shares are never supplied through command-line arguments.
+    """
+
+    def get_share(number: int, total: int) -> str:
+        typer.echo(f"Enter OpenBao share {number} of {total}")
+        return prompt_secret(f"Unseal share {number} of {total}")
+
+    try:
+        target = resolve_service(
+            estate_root=_estate_root(),
+            name="openbao",
+        ).target
+
+        typer.echo(f"Service     {target.name}")
+        typer.echo(f"Address     {target.address}")
+
+        result = unseal_openbao(
+            target.address,
+            get_share=get_share,
+        )
+
+    except SecretEntryCancelled:
+        typer.echo("CANCELLED   OpenBao unseal", err=True)
+        raise typer.Exit(130) from None
+
+    except (SecretEntryError, ServiceError, OpenBaoError) as exc:
+        typer.echo(f"ERROR: {exc}", err=True)
+        raise typer.Exit(1) from exc
+
+    if result.sealed:
+        typer.echo(
+            "INCOMPLETE  OpenBao remains sealed "
+            f"({result.progress}/{result.threshold})",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    typer.echo("OK         OpenBao unsealed")
+
+
+@openbao_app.command("restore")
+def openbao_restore_command(
+    snapshot: Annotated[
+        str,
+        typer.Option(
+            "--snapshot",
+            help="Local or remote OpenBao Raft snapshot URI.",
+        ),
+    ],
+) -> None:
+    """Restore an estate-managed OpenBao authority from a snapshot.
+
+    Display the verified restoration plan and require explicit operator
+    authorization before invoking the complete recovery capability.
+
+    Snapshot acquisition, integrity verification, temporary bootstrap,
+    restoration, restart, and post-restore verification are delegated
+    to restore_openbao().
+    """
+
+    def authorize(plan: OpenBaoRestorePlan) -> bool:
+        """Present the verified plan and request operator approval."""
+        typer.echo("")
+        typer.echo("OpenBao authority restoration")
+        typer.echo(f"Address     {plan.address}")
+        typer.echo(f"Machine     {plan.machine}")
+        typer.echo(f"Snapshot    {plan.snapshot_source}")
+        typer.echo(f"Size        {plan.snapshot_size} bytes")
+        typer.echo(f"SHA-256     {plan.snapshot_sha256}")
+        typer.echo(
+            f"Seal        {plan.expected_shares} shares / "
+            f"threshold {plan.expected_threshold}"
+        )
+
+        typer.echo("")
+        typer.echo(
+            "WARNING: This operation replaces the destination OpenBao authority."
+        )
+        typer.echo(
+            "The destination must be uninitialized. "
+            "The original Shamir shares will be required afterward."
+        )
+        typer.echo("")
+
+        confirmation = typer.prompt(
+            "Type RESTORE to authorize",
+            default="",
+            show_default=False,
+        )
+
+        return confirmation == "RESTORE"
+
+    try:
+        result = restore_openbao(
+            estate_root=_estate_root(),
+            snapshot_uri=snapshot,
+            authorize=authorize,
+        )
+
+    except PermissionError:
+        typer.echo("CANCELLED   OpenBao restoration")
+        raise typer.Exit(1) from None
+
+    except OpenBaoRecoveryInterruptedError as exc:
+        typer.echo(f"INTERRUPTED OpenBao recovery: {exc.phase}", err=True)
+        typer.echo(
+            "The destination may have changed. "
+            "Do not retry without inspecting its state.",
+            err=True,
+        )
+
+        raise typer.Exit(1) from None
+
+    except (ServiceError, SnapshotError, OpenBaoError) as exc:
+        typer.echo(f"ERROR: {exc}", err=True)
+        raise typer.Exit(1) from exc
+
+    typer.echo("")
+    typer.echo("OK         OpenBao authority restored")
+    typer.echo(f"SHA-256     {result.restore.sha256}")
+    typer.echo(f"Size        {result.restore.size} bytes")
+    typer.echo(f"Seal        {result.shares} shares / threshold {result.threshold}")
+    typer.echo("State       Initialized and sealed")
+    typer.echo("")
+    typer.echo("Next: unseal OpenBao using the original physical Shamir shares.")
