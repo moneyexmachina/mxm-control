@@ -21,6 +21,7 @@ from mxm.control.ansible import (
     plan_ansible,
 )
 from mxm.control.authorize import AuthorizationError, authorize_machine
+from mxm.control.console import ConsoleError, open_console
 from mxm.control.credentials import CredentialError, run_with_credentials
 from mxm.control.github.actions_policy import (
     ActionsPolicyError,
@@ -81,6 +82,10 @@ check_app = typer.Typer(
 openbao_app = typer.Typer(
     help="Operate estate-managed OpenBao authorities.",
 )
+open_app = typer.Typer(
+    help="Open graphical operator consoles.",
+)
+app.add_typer(open_app, name="open")
 app.add_typer(plan_app, name="plan")
 app.add_typer(preflight_app, name="preflight")
 app.add_typer(apply_app, name="apply")
@@ -872,3 +877,13 @@ def authorize_command(name: str) -> None:
         raise typer.Exit(1) from exc
 
     typer.echo(f"OK        {name} authorized")
+
+
+@open_app.command("ibgateway")
+def open_ibgateway_command() -> None:
+    """Open the estate-managed IB Gateway graphical console."""
+    try:
+        open_console("ibgateway")
+    except ConsoleError as exc:
+        typer.echo(f"ERROR: {exc}", err=True)
+        raise typer.Exit(1) from exc
