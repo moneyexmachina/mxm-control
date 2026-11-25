@@ -47,16 +47,31 @@ class ServiceTarget:
 
 
 @dataclass(frozen=True, slots=True)
+class ConsoleTarget:
+    """Estate-declared graphical console endpoint.
+
+    Attributes:
+        protocol: Remote console protocol, currently VNC.
+        port: TCP port exposed on the target machine's loopback.
+    """
+
+    protocol: str
+    port: int
+
+
+@dataclass(frozen=True, slots=True)
 class RegisteredService:
-    """Resolved estate service and its operator credential directory.
+    """Resolved estate service and its optional capabilities.
 
     Attributes:
         target: Service identity resolved by the declared mechanism.
         credentials: Optional directory containing credentials.toml.
+        console: Optional graphical console endpoint.
     """
 
     target: ServiceTarget
     credentials: Path | None
+    console: ConsoleTarget | None = None
 
 
 def _declared_directory(
@@ -112,6 +127,37 @@ def _load_service_registration(
         raise ServiceError(f"Service not registered in estate: {name}")
 
     return cast("dict[str, object]", raw_registration)
+
+
+def _resolve_console(
+    registration: dict[str, object],
+    *,
+    name: str,
+) -> ConsoleTarget | None:
+    """Validate an optional estate-declared graphical console."""
+    raw_console = registration.get("console")
+
+    if raw_console is None:
+        return None
+
+    if not isinstance(raw_console, dict):
+        raise ServiceError(f"Invalid console declaration for {name}")
+
+    console = cast("dict[str, object]", raw_console)
+
+    protocol = console.get("protocol")
+    port = console.get("port")
+
+    if protocol != "vnc":
+        raise ServiceError(f"Unsupported console protocol for {name}: {protocol!r}")
+
+    if type(port) is not int or not 1 <= port <= 65535:
+        raise ServiceError(f"Invalid console TCP port for {name}")
+
+    return ConsoleTarget(
+        protocol="vnc",
+        port=port,
+    )
 
 
 def resolve_service(
@@ -179,10 +225,12 @@ def resolve_service(
     return RegisteredService(
         target=target,
         credentials=credentials,
+        console=_resolve_console(registration, name=name),
     )
 
 
 __all__ = [
+    "ConsoleTarget",
     "RegisteredService",
     "ServiceError",
     "ServiceRestartUncertainError",
